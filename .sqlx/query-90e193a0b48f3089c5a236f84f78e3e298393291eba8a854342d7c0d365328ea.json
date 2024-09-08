@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM post WHERE uri = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "90e193a0b48f3089c5a236f84f78e3e298393291eba8a854342d7c0d365328ea"
+}

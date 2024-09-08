@@ -23,9 +23,29 @@ fn get_language(txt: &str) -> Option<lingua::Language> {
     detector.detect_language_of(txt)
 }
 
-pub async fn process_post(db: &State, at_uri: String, cid: &Cid, mut post: Post) {
+async fn should_add_post(db: &State, at_uri: &str, post: &mut Post) -> bool {
+    if let Some(ref reply) = post.reply {
+        let parent_uri = reply.parent.uri.as_str();
+        let root_uri = reply.root.uri.as_str();
+
+        match sqlx::query!(
+            r#"SELECT count(*)>1 as "has_anscestors: bool" FROM post WHERE uri = ? OR uri = ?"#,
+            parent_uri,
+            root_uri
+        )
+        .fetch_optional(&db.db)
+        .await
+        {
+            Ok(Some(v)) if v.has_anscestors => return true,
+            Ok(_) => {}
+            Err(e) => {
+                error!("failed to check if post has existing ancestors: {e}");
+            }
+        }
+    }
+
     if !is_possibly_hebrew(&post.text) {
-        return;
+        return false;
     }
 
     if let Some(ref langs) = post.langs {
@@ -39,7 +59,7 @@ pub async fn process_post(db: &State, at_uri: String, cid: &Cid, mut post: Post)
             }
         }
         if !has_he && has_yi {
-            return;
+            return false;
         }
     }
 
@@ -72,10 +92,18 @@ pub async fn process_post(db: &State, at_uri: String, cid: &Cid, mut post: Post)
     let res = tokio::task::block_in_place(move || get_language(&post_.text));
     if let Some(lang) = res {
         if lang != Language::Hebrew {
-            return;
+            return false;
         }
     } else {
         debug!("failed to detect language of post {}", &at_uri);
+        return false;
+    }
+
+    false
+}
+
+pub async fn process_post(db: &State, at_uri: String, cid: &Cid, mut post: Post) {
+    if !should_add_post(db, at_uri.as_str(), &mut post).await {
         return;
     }
 

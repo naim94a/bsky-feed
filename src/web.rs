@@ -85,7 +85,7 @@ async fn get_feed_skeleton(
                         .map(|row| {
                             cursor = row.indexed;
                             let post = atrium_api::app::bsky::feed::defs::SkeletonFeedPostData {
-                                feed_context: Some("hebrew language".to_owned()),
+                                feed_context: None,
                                 post: format!("at://{}", row.uri),
                                 reason: None,
                             };

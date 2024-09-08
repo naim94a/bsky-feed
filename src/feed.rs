@@ -23,6 +23,34 @@ fn get_language(txt: &str) -> Option<lingua::Language> {
     detector.detect_language_of(txt)
 }
 
+async fn is_ignored(db: &State, at_uri: &str) -> bool {
+    let did = match at_uri.strip_prefix("at://") {
+        None => return true, // invalid at://
+        Some(v) => {
+            let mut x = v.splitn(2, '/');
+            match x.next() {
+                None => return true, // invalid uri ...
+                Some(v) => v,
+            }
+        }
+    };
+
+    match sqlx::query!(
+        r#"SELECT count(*)>0 as "ignored: i32" FROM ignores WHERE did = ?"#,
+        did
+    )
+    .fetch_optional(&db.db)
+    .await
+    {
+        Ok(Some(res)) if res.ignored != 0 => return true,
+        Ok(_) => return false,
+        Err(err) => {
+            error!("failed to check if ignored! {err}");
+            return false;
+        }
+    }
+}
+
 async fn should_add_post(db: &State, at_uri: &str, post: &mut Post) -> bool {
     if let Some(ref reply) = post.reply {
         let parent_uri = reply.parent.uri.as_str().strip_prefix("at://");
@@ -61,6 +89,11 @@ async fn should_add_post(db: &State, at_uri: &str, post: &mut Post) -> bool {
         if !has_he && has_yi {
             return false;
         }
+    }
+
+    if is_ignored(db, at_uri).await {
+        debug!("DID is ignored: {at_uri}");
+        return false;
     }
 
     if let Some(ref facets) = post.facets {

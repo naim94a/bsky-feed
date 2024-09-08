@@ -25,11 +25,11 @@ fn get_language(txt: &str) -> Option<lingua::Language> {
 
 async fn should_add_post(db: &State, at_uri: &str, post: &mut Post) -> bool {
     if let Some(ref reply) = post.reply {
-        let parent_uri = reply.parent.uri.as_str();
-        let root_uri = reply.root.uri.as_str();
+        let parent_uri = reply.parent.uri.as_str().strip_prefix("at://");
+        let root_uri = reply.root.uri.as_str().strip_prefix("at://");
 
         match sqlx::query!(
-            r#"SELECT count(*)>1 as "has_anscestors: bool" FROM post WHERE uri = ? OR uri = ?"#,
+            r#"SELECT count(*)>0 as "has_anscestors: bool" FROM post WHERE uri = ? OR uri = ?"#,
             parent_uri,
             root_uri
         )
@@ -99,7 +99,7 @@ async fn should_add_post(db: &State, at_uri: &str, post: &mut Post) -> bool {
         return false;
     }
 
-    false
+    true
 }
 
 pub async fn process_post(db: &State, at_uri: String, cid: &Cid, mut post: Post) {

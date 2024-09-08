@@ -24,15 +24,11 @@ fn get_language(txt: &str) -> Option<lingua::Language> {
 }
 
 async fn is_ignored(db: &State, at_uri: &str) -> bool {
-    let did = match at_uri.strip_prefix("at://") {
-        None => return true, // invalid at://
-        Some(v) => {
-            let mut x = v.splitn(2, '/');
-            match x.next() {
-                None => return true, // invalid uri ...
-                Some(v) => v,
-            }
-        }
+    let did = at_uri.strip_prefix("at://").unwrap_or(at_uri);
+    let mut x = did.splitn(2, '/');
+    let did = match x.next() {
+        None => return true, // invalid uri ...
+        Some(v) => v,
     };
 
     match sqlx::query!(

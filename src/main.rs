@@ -10,6 +10,20 @@ mod feed;
 mod firehose;
 mod web;
 
+#[tracing::instrument(skip_all)]
+async fn flush_cursor(db: &sqlx::Pool<sqlx::Sqlite>, rx: &mut tokio::sync::watch::Receiver<i64>) {
+    let seq = { *rx.borrow_and_update() };
+    if seq == 0 {
+        return;
+    }
+    if db.execute(sqlx::query!(
+        "INSERT INTO subscriber_state VALUES ('hebrewsky', ?) ON CONFLICT (service) DO UPDATE SET cursor=excluded.cursor",
+        seq
+    )).await.is_ok() {
+        debug!("cursor updated to {seq}");
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let _ = dotenvy::dotenv();
@@ -42,33 +56,26 @@ async fn main() {
             Some(r)
         }
     };
+    let (last_seq_tx, mut last_seq_rx) = tokio::sync::watch::channel(0);
+
+    let mut last_seq_rx2 = last_seq_rx.clone();
     let server = async move {
         let (tx, rx) = flume::bounded(10_000);
         tokio::task::spawn(
             firehose::collect_firehose_events(tx, last_cursor).with_current_subscriber(),
         );
 
-        let (last_seq_tx, mut last_seq_rx) = tokio::sync::watch::channel(0);
-
         let db = state_server.db.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(10));
-            loop {
-                interval.tick().await;
-                let seq = { *last_seq_rx.borrow_and_update() };
-                if seq == 0 {
-                    continue;
+        tokio::spawn(
+            async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(10));
+                loop {
+                    interval.tick().await;
+                    flush_cursor(&db, &mut last_seq_rx2).await;
                 }
-                if db
-                    .execute(sqlx::query!(
-                        "INSERT INTO subscriber_state VALUES ('hebrewsky', ?) ON CONFLICT (service) DO UPDATE SET cursor=excluded.cursor",
-                        seq
-                    ))
-                    .await.is_ok() {
-                        debug!("cursor updated to {seq}");
-                    }
             }
-        }.with_current_subscriber());
+            .with_current_subscriber(),
+        );
 
         let db = state_server.db.clone();
         tokio::spawn(
@@ -143,6 +150,7 @@ async fn main() {
         }
     }
 
+    flush_cursor(&state.db, &mut last_seq_rx).await;
     state.db.close().await;
     info!("bye.");
 }

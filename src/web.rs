@@ -68,7 +68,8 @@ async fn get_feed_skeleton(
             };
             let mut cursor = None;
             match sqlx::query!(
-                r#"SELECT uri, indexed_dt as "indexed: i64" FROM post WHERE ($0 is NOT NULL AND indexed_dt <= $0) ORDER BY indexed_dt DESC LIMIT $1"#,
+                r#"SELECT uri, indexed_dt as "indexed: i64" FROM post WHERE (? is NULL OR indexed_dt < ?) ORDER BY indexed_dt DESC LIMIT ?"#,
+                start_cursor,
                 start_cursor,
                 limit
             )
@@ -92,6 +93,9 @@ async fn get_feed_skeleton(
                         })
                         .collect();
                 }
+            }
+            if limit > feed.len() as i32 || cursor == start_cursor {
+                cursor = None;
             }
             GetFeedSkeletorResult::Ok(get_feed_skeleton::OutputData {
                 cursor: cursor.map(|v| v.to_string()),

@@ -1,4 +1,4 @@
-use std::{io::Cursor, sync::atomic::AtomicI64, time::Duration};
+use std::{io::Cursor, time::Duration};
 
 use atrium_api::com::atproto::sync::subscribe_repos::Message;
 use flume::Sender;

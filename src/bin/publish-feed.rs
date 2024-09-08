@@ -1,10 +1,7 @@
-use std::collections::HashMap;
-
 use atrium_api::types::{
     string::{AtIdentifier, Did, Handle},
-    Collection, DataModel,
+    Collection,
 };
-use serde::Serialize;
 
 #[tokio::main]
 async fn main() {
@@ -15,13 +12,13 @@ async fn main() {
     let did = Did::new(format!("did:web:{hostname}")).unwrap();
 
     let feed = atrium_api::app::bsky::feed::generator::RecordData {
-        accepts_interactions: None,
+        accepts_interactions: Some(false),
         avatar: None,
         created_at: atrium_api::types::string::Datetime::now(),
-        description: None,
+        description: Some("github.com/naim94a/bsky-feed".to_owned()),
         description_facets: None,
         did,
-        display_name: "טעסטים".to_owned(),
+        display_name: "עוד פידעברית".to_owned(),
         labels: None,
     };
     let ipld = ipld_core::serde::to_ipld(&feed).unwrap();
@@ -32,12 +29,12 @@ async fn main() {
         repo: AtIdentifier::Handle(Handle::new(owner_handle.clone()).unwrap()),
         swap_commit: None,
         swap_record: None,
-        validate: None,
+        validate: Some(true),
         record: atrium_api::types::Unknown::Other(ipld.try_into().unwrap()),
     };
 
     let client = bsky_sdk::BskyAgent::builder().build().await.unwrap();
-    let session = client
+    client
         .login(owner_handle, owner_access_token)
         .await
         .unwrap();

@@ -1,18 +1,14 @@
-use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::db::State;
 use atrium_api::app::bsky::feed::describe_feed_generator;
 use atrium_api::app::bsky::feed::get_feed_skeleton;
 use atrium_api::types::string::Did;
-use axum::body::Body;
 use axum::Json;
 use serde::Serialize;
 use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 use tracing::error;
-use tracing::info;
-use tracing::trace;
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -127,7 +123,7 @@ struct WellKnownDid {
 }
 
 async fn well_known_did(
-    axum::extract::State(s): axum::extract::State<State>,
+    axum::extract::State(_s): axum::extract::State<State>,
 ) -> Json<WellKnownDid> {
     let svc = WellKnownDidService {
         id: "#bsky_fg",

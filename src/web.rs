@@ -1,3 +1,4 @@
+use std::i64;
 use std::sync::OnceLock;
 
 use crate::db::State;
@@ -58,8 +59,17 @@ async fn get_feed_skeleton(
         "hebrew-feed" => {
             let mut feed = vec![];
             let limit = q.limit.map(|v| u8::from(v)).unwrap_or(100) as i32;
+            let start_cursor = match q.cursor {
+                None => None,
+                Some(v) => match v.parse::<i64>() {
+                    Ok(v) => Some(v),
+                    Err(_) => None,
+                },
+            };
+            let mut cursor = None;
             match sqlx::query!(
-                "SELECT uri FROM post ORDER BY indexed_dt DESC LIMIT ?",
+                r#"SELECT uri, indexed_dt as "indexed: i64" FROM post WHERE ($0 is NOT NULL AND indexed_dt <= $0) ORDER BY indexed_dt DESC LIMIT $1"#,
+                start_cursor,
                 limit
             )
             .fetch_all(&s.db)
@@ -72,6 +82,7 @@ async fn get_feed_skeleton(
                     feed = rows
                         .into_iter()
                         .map(|row| {
+                            cursor = row.indexed;
                             let post = atrium_api::app::bsky::feed::defs::SkeletonFeedPostData {
                                 feed_context: Some("hebrew language".to_owned()),
                                 post: format!("at://{}", row.uri),
@@ -82,7 +93,11 @@ async fn get_feed_skeleton(
                         .collect();
                 }
             }
-            GetFeedSkeletorResult::Ok(get_feed_skeleton::OutputData { cursor: None, feed }).into()
+            GetFeedSkeletorResult::Ok(get_feed_skeleton::OutputData {
+                cursor: cursor.map(|v| v.to_string()),
+                feed,
+            })
+            .into()
         }
         _ => GetFeedSkeletorResult::Err(get_feed_skeleton::Error::UnknownFeed(None)).into(),
     }

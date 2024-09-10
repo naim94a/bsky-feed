@@ -1,4 +1,4 @@
-use std::{io::Cursor, time::Duration};
+use std::{borrow::Cow, io::Cursor, time::Duration};
 
 use atrium_api::com::atproto::sync::subscribe_repos::Message;
 use flume::Sender;
@@ -108,9 +108,9 @@ pub async fn collect_firehose_events(tx: Sender<Vec<u8>>, cursor: Option<i64>) {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct Header {
+pub struct Header<'a> {
     #[serde(rename(deserialize = "t"))]
-    pub type_: String,
+    pub type_: Cow<'a, str>,
     #[serde(rename(deserialize = "op"))]
     pub _operation: u8,
 }
@@ -126,7 +126,7 @@ enum KnownRecordSubset {
 fn read_subscribe_repos(buffer: &[u8]) -> Option<(Header, Message)> {
     let mut reader = Cursor::new(buffer);
     let header = ciborium::de::from_reader::<Header, _>(&mut reader).ok()?;
-    let m = match header.type_.as_str() {
+    let m = match header.type_.as_ref() {
         "#commit" => Message::Commit(serde_ipld_dagcbor::from_reader(&mut reader).ok()?),
         // "#handle" => Message::Handle(serde_ipld_dagcbor::from_reader(&mut reader).ok()?),
         // "#tombstone" => Message::Tombstone(serde_ipld_dagcbor::from_reader(&mut reader).ok()?),
@@ -173,10 +173,26 @@ pub async fn process_firehose_blob(db: State, blob: Vec<u8>) -> Option<i64> {
                                     Ok(v) => v,
                                     Err(_) => continue,
                                 };
+
                                 // currently using conflicting `cid` crate versions...
-                                if record_cid.to_bytes() != cid.0.to_bytes() {
-                                    // debug!("unexpected cid");
-                                    continue;
+                                {
+                                    let mut rec_cid = [0u8; 256];
+                                    let mut rec_cid = Cursor::new(rec_cid.as_mut_slice());
+                                    let mut exp_cid = [0u8; 256];
+                                    let mut exp_cid = Cursor::new(exp_cid.as_mut_slice());
+
+                                    let rec_cid = match record_cid.write_bytes(&mut rec_cid) {
+                                        Ok(sz) => &rec_cid.into_inner()[..sz],
+                                        Err(_) => continue,
+                                    };
+                                    let exp_cid = match cid.0.write_bytes(&mut exp_cid) {
+                                        Ok(sz) => &exp_cid.into_inner()[..sz],
+                                        Err(_) => continue,
+                                    };
+
+                                    if rec_cid != exp_cid {
+                                        continue;
+                                    }
                                 }
 
                                 match serde_cbor::from_slice::<KnownRecordSubset>(&record_data) {

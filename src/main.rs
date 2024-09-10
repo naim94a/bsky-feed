@@ -4,7 +4,6 @@ use sqlx::Executor;
 use tracing::{debug, error, info, instrument::WithSubscriber};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod car;
 mod db;
 mod feed;
 mod firehose;

@@ -23,6 +23,7 @@ fn get_language(txt: &str) -> Option<lingua::Language> {
     detector.detect_language_of(txt)
 }
 
+#[tracing::instrument(skip_all)]
 async fn is_ignored(db: &State, at_uri: &str) -> bool {
     let did = at_uri.strip_prefix("at://").unwrap_or(at_uri);
     let mut x = did.splitn(2, '/');
@@ -47,6 +48,7 @@ async fn is_ignored(db: &State, at_uri: &str) -> bool {
     }
 }
 
+#[tracing::instrument(skip_all)]
 async fn should_add_post(db: &State, at_uri: &str, post: &mut Post) -> bool {
     if let Some(ref reply) = post.reply {
         let parent_uri = reply.parent.uri.as_str().strip_prefix("at://");
@@ -131,8 +133,9 @@ async fn should_add_post(db: &State, at_uri: &str, post: &mut Post) -> bool {
     true
 }
 
-pub async fn process_post(db: &State, at_uri: String, cid: &Cid, mut post: Post) {
-    if !should_add_post(db, at_uri.as_str(), &mut post).await {
+#[tracing::instrument(skip_all)]
+pub async fn process_post(db: &State, at_uri: &str, cid: &Cid, mut post: Post) {
+    if !should_add_post(db, at_uri, &mut post).await {
         return;
     }
 
@@ -164,7 +167,8 @@ pub async fn process_post(db: &State, at_uri: String, cid: &Cid, mut post: Post)
     }
 }
 
-pub async fn delete_post(db: &State, at_uri: String) {
+#[tracing::instrument(skip_all)]
+pub async fn delete_post(db: &State, at_uri: &str) {
     match db
         .db
         .execute(sqlx::query!("DELETE FROM post WHERE uri = ?", at_uri))

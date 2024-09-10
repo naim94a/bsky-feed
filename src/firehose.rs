@@ -2,6 +2,7 @@ use std::{io::Cursor, time::Duration};
 
 use atrium_api::com::atproto::sync::subscribe_repos::Message;
 use flume::Sender;
+use futures::StreamExt;
 use hyper::header::{SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, USER_AGENT};
 use reqwest::header::{CONNECTION, UPGRADE};
 use serde::Deserialize;
@@ -153,30 +154,34 @@ pub async fn process_firehose_blob(db: State, blob: Vec<u8>) -> Option<i64> {
                 .iter()
                 .filter(|v| v.path.starts_with("app.bsky.feed.post/"));
             for op in commits {
-                let get_uri = || format!("{}/{}", &commit.repo.as_str(), &op.path);
+                let uri = format!("{}/{}", &commit.repo.as_str(), &op.path);
+
                 match op.action.as_str() {
                     "create" => {
                         if let Some(ref cid) = op.cid {
-                            let mut cursor = Cursor::new(&commit.blocks);
-                            let _record_header = match crate::car::read_header(&mut cursor) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    debug!("failed to parse record header: {e:?}");
+                            let mut buffer = futures::io::Cursor::new(&commit.blocks);
+                            let mut car_reader =
+                                match rs_car::CarReader::new(&mut buffer, false).await {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        debug!("failed to parse record header: {e:?}");
+                                        continue;
+                                    }
+                                };
+                            while let Some(record) = car_reader.next().await {
+                                let (record_cid, record_data) = match record {
+                                    Ok(v) => v,
+                                    Err(_) => continue,
+                                };
+                                // currently using conflicting `cid` crate versions...
+                                if record_cid.to_bytes() != cid.0.to_bytes() {
+                                    // debug!("unexpected cid");
                                     continue;
                                 }
-                            };
-                            let record = match crate::car::read_blocks(&mut cursor) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    debug!("failed to parse record body: {e:?}");
-                                    continue;
-                                }
-                            };
 
-                            if let Some(v) = record.get(&cid.0) {
-                                match serde_cbor::from_slice::<KnownRecordSubset>(&v) {
+                                match serde_cbor::from_slice::<KnownRecordSubset>(&record_data) {
                                     Ok(KnownRecordSubset::AppBskyFeedPost(post)) => {
-                                        feed::process_post(&db, get_uri(), &cid.0, post.data).await;
+                                        feed::process_post(&db, &uri, &cid.0, post.data).await;
                                     }
                                     Err(_e) => continue,
                                 }
@@ -184,7 +189,7 @@ pub async fn process_firehose_blob(db: State, blob: Vec<u8>) -> Option<i64> {
                         }
                     }
                     "delete" => {
-                        feed::delete_post(&db, get_uri()).await;
+                        feed::delete_post(&db, &uri).await;
                     }
                     _ => {}
                 }

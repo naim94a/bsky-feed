@@ -3,11 +3,14 @@ use std::{
     usize,
 };
 
-use atrium_api::app::bsky::feed::post::RecordData as Post;
+use atrium_api::{
+    app::bsky::{feed::post::RecordData as Post, richtext::facet::MainFeaturesItem},
+    types::Union,
+};
 use cid::Cid;
-use lingua::Language;
 use sqlx::Executor;
 use tracing::{debug, error, info};
+use whatlang::Lang;
 
 use crate::db::State;
 
@@ -16,11 +19,10 @@ fn is_possibly_hebrew(text: &str) -> bool {
     text.chars().any(|v| hebrew_chars.contains(&v))
 }
 
-fn get_language(txt: &str) -> Option<lingua::Language> {
-    static DETECTOR: OnceLock<lingua::LanguageDetector> = OnceLock::new();
-    let detector = DETECTOR
-        .get_or_init(|| lingua::LanguageDetectorBuilder::from_all_spoken_languages().build());
-    detector.detect_language_of(txt)
+fn get_language(txt: &str) -> Option<whatlang::Lang> {
+    static DETECTOR: OnceLock<whatlang::Detector> = OnceLock::new();
+    let detector = DETECTOR.get_or_init(|| whatlang::Detector::new());
+    detector.detect_lang(txt)
 }
 
 #[tracing::instrument(skip_all)]
@@ -122,7 +124,7 @@ async fn should_add_post(db: &State, at_uri: &str, post: &mut Post) -> bool {
     let post_ = post.clone();
     let res = tokio::task::block_in_place(move || get_language(&post_.text));
     if let Some(lang) = res {
-        if lang != Language::Hebrew {
+        if lang != Lang::Heb {
             return false;
         }
     } else {

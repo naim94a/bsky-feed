@@ -3,7 +3,10 @@ use std::{borrow::Cow, io::Cursor, time::Duration};
 use atrium_api::com::atproto::sync::subscribe_repos::Message;
 use flume::Sender;
 use futures::StreamExt;
-use hyper::header::{SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, USER_AGENT};
+use hyper::{
+    header::{SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, USER_AGENT},
+    StatusCode,
+};
 use reqwest::header::{CONNECTION, UPGRADE};
 use serde::Deserialize;
 use tracing::{debug, error, info, warn};
@@ -56,13 +59,12 @@ async fn connect_firehose(
 
     let response = client.execute(req).await.ok()?.error_for_status().ok()?;
 
-    assert_eq!(
-        response.status(),
-        reqwest::StatusCode::SWITCHING_PROTOCOLS,
-        "unexpected status code from firehose endpoint"
-    );
+    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+        error!("unexpected http response: {}", response.status());
+        return None;
+    }
 
-    let upgraded = response.upgrade().await.unwrap();
+    let upgraded = response.upgrade().await.ok()?;
     Some(fastwebsockets::WebSocket::after_handshake(
         upgraded,
         fastwebsockets::Role::Client,

@@ -3,10 +3,7 @@ use std::{
     usize,
 };
 
-use atrium_api::{
-    app::bsky::{feed::post::RecordData as Post, richtext::facet::MainFeaturesItem},
-    types::Union,
-};
+use atrium_api::app::bsky::feed::post::RecordData as Post;
 use cid::Cid;
 use sqlx::Executor;
 use tracing::{debug, error, info};
@@ -124,6 +121,7 @@ async fn should_add_post(db: &State, at_uri: &str, post: &mut Post) -> bool {
     let post_ = post.clone();
     let res = tokio::task::block_in_place(move || get_language(&post_.text));
     if let Some(lang) = res {
+        debug!("lang = {lang:?}");
         if lang != Lang::Heb {
             return false;
         }

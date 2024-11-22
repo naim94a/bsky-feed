@@ -6,10 +6,15 @@ use atrium_api::app::bsky::feed::describe_feed_generator;
 use atrium_api::app::bsky::feed::get_feed_skeleton;
 use atrium_api::types::string::Did;
 use axum::Json;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
-use tracing::error;
+use tracing::{error, trace};
+
+use axum::async_trait;
+use axum::extract::FromRequestParts;
+use base64::Engine;
+use hyper::header;
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -46,9 +51,64 @@ fn get_res() -> &'static StaticRes {
     })
 }
 
+#[derive(Deserialize, Debug)]
+struct JwtPayload {
+    iat: u32,
+    iss: String,
+    aud: String,
+    exp: u32,
+    lxm: String,
+    jti: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct JwtHeader {
+    typ: String,
+    alg: String,
+}
+
+struct AuthExtractor;
+#[async_trait]
+impl<S> FromRequestParts<S> for AuthExtractor {
+    type Rejection = ();
+
+    async fn from_request_parts(
+        req: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let auth = req.headers.get(header::AUTHORIZATION).ok_or(())?;
+        let auth = auth.to_str().map_err(|_| ())?;
+        let auth = auth.strip_prefix("Bearer ").ok_or(())?;
+        let auth = auth.trim();
+        let mut auth = auth.split('.');
+        let header = auth.next().ok_or(())?;
+        let payload = auth.next().ok_or(())?;
+        let sig = auth.next().ok_or(())?;
+        if auth.next().is_some() {
+            return Err(());
+        }
+
+        // let header = serde_json::from_str::<JwtHeader>(header).map_err(|_| ())?;
+
+        let payload = {
+            let mut res = vec![];
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode_vec(payload, &mut res)
+                .map_err(|_| ())?;
+            res
+        };
+        let payload = serde_json::from_slice::<JwtPayload>(&payload).map_err(|_| ())?;
+        trace!("current token = {:?}", &payload);
+
+        //        tracing::info!(" auth = {auth} ");
+        Ok(Self)
+    }
+}
+
 async fn get_feed_skeleton(
     axum::extract::State(s): axum::extract::State<State>,
     axum::extract::Query(q): axum::extract::Query<get_feed_skeleton::ParametersData>,
+    _auth: Option<AuthExtractor>,
 ) -> axum::Json<GetFeedSkeletorResult> {
     let requested_feed = q.feed.as_str();
     if !requested_feed.starts_with(get_res().feed_prefix) {
@@ -68,7 +128,7 @@ async fn get_feed_skeleton(
             };
             let mut cursor = None;
             match sqlx::query!(
-                r#"SELECT uri, indexed_dt as "indexed: i64" FROM post WHERE (? is NULL OR indexed_dt < ?) ORDER BY indexed_dt DESC LIMIT ?"#,
+                r#"SELECT uri, indexed_dt as "indexed: i64" FROM post WHERE (? is NULL OR indexed_dt < ?) ORDER BY (indexed_dt/60) DESC, created_at DESC LIMIT ?"#,
                 start_cursor,
                 start_cursor,
                 limit
@@ -167,12 +227,12 @@ pub async fn web_server(state: State) {
             axum::routing::get(describe_feed_generator),
         )
         .route("/.well-known/did.json", axum::routing::get(well_known_did))
-        .with_state(state)
         .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http())
+        .with_state(state);
 
     axum::serve(
-        tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap(),
+        tokio::net::TcpListener::bind("0.0.0.0:80").await.unwrap(),
         app,
     )
     .await

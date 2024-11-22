@@ -54,6 +54,8 @@ async fn connect_firehose(
         // WebSocket doesn't seem to work on 2+
         .http1_only()
         .https_only(true)
+        .read_timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(10))
         .build()
         .ok()?;
 
@@ -101,8 +103,7 @@ pub async fn collect_firehose_events(tx: Sender<Vec<u8>>, cursor: Option<i64>) {
                 }
                 Err(e) => {
                     error!("websocket error! {e}");
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                    continue 'ws;
+                    return;
                 }
             }
         }

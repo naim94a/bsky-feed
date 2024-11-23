@@ -9,6 +9,7 @@ use hyper::{
 };
 use reqwest::header::{CONNECTION, UPGRADE};
 use serde::Deserialize;
+use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
 use crate::{db::State, feed};
@@ -89,7 +90,14 @@ pub async fn collect_firehose_events(tx: Sender<Vec<u8>>, cursor: Option<i64>) {
         let mut firehose = fastwebsockets::FragmentCollector::new(firehose);
 
         loop {
-            match firehose.read_frame().await {
+            let v = match timeout(Duration::from_secs(10), firehose.read_frame()).await {
+                Ok(v) => v,
+                Err(err) => {
+                    warn!("read_frame timeout. {err}");
+                    return;
+                }
+            };
+            match v {
                 Ok(frame) => {
                     if frame.opcode != fastwebsockets::OpCode::Binary {
                         warn!("unexpected frame {:?}", frame.opcode);

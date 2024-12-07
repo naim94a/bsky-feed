@@ -1,0 +1,454 @@
+use std::{
+    borrow::Cow, collections::HashMap, future::Future, io::Cursor, str::FromStr, sync::Arc,
+    time::Duration,
+};
+
+use atrium_api::{
+    com::atproto::sync::subscribe_repos::{Commit, Message},
+    record::KnownRecord,
+};
+use bitflags::bitflags;
+use flume::{Receiver, Sender};
+use futures::StreamExt;
+use hyper::{
+    header::{SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, USER_AGENT},
+    StatusCode,
+};
+use reqwest::header::{CONNECTION, UPGRADE};
+use serde::Deserialize;
+use tokio::time::timeout;
+use tracing::{error, info, warn};
+
+bitflags! {
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+        pub struct MessageTypes: u32 {
+            const Commit = 1 << 0;
+            const Handle = 1 << 1;
+            const Tombstone = 1 << 2;
+            const Account = 1 << 3;
+            const Identity = 1 << 4;
+        }
+
+        #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+        pub struct Collections: u32 {
+            const AppBskyActorProfile = 1 << 0;
+            const AppBskyFeedGenerator = 1 << 1;
+            const AppBskyFeedLike = 1 << 2;
+            const AppBskyFeedPost = 1 << 3;
+            const AppBskyFeedPostgate = 1 << 4;
+            const AppBskyFeedRepost = 1 << 5;
+            const AppBskyFeedThreadgate = 1 << 6;
+            const AppBskyGraphBlock = 1 << 7;
+            const AppBskyGraphFollow = 1 << 8;
+            const AppBskyGraphList = 1 << 9;
+            const AppBskyGraphListblock = 1 << 10;
+            const AppBskyGraphListitem = 1 << 11;
+            const AppBskyGraphStarterpack = 1 << 12;
+            const AppBskyLabelerService = 1 << 13;
+            const ChatBskyActorDeclaration = 1 << 14;
+        }
+}
+
+impl FromStr for MessageTypes {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "#commit" => MessageTypes::Commit,
+            "#handle" => MessageTypes::Handle,
+            "#tombstone" => MessageTypes::Tombstone,
+            "#account" => MessageTypes::Account,
+            "#identity" => MessageTypes::Identity,
+            _ => return Err(()),
+        })
+    }
+}
+
+impl FromStr for Collections {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "app.bsky.actor.profile" => Collections::AppBskyActorProfile,
+            "app.bsky.feed.generator" => Collections::AppBskyFeedGenerator,
+            "app.bsky.feed.like" => Collections::AppBskyFeedLike,
+            "app.bsky.feed.post" => Collections::AppBskyFeedPost,
+            "app.bsky.feed.postgate" => Collections::AppBskyFeedPostgate,
+            "app.bsky.feed.repost" => Collections::AppBskyFeedRepost,
+            "app.bsky.feed.threadgate" => Collections::AppBskyFeedThreadgate,
+            "app.bsky.graph.block" => Collections::AppBskyGraphBlock,
+            "app.bsky.graph.follow" => Collections::AppBskyGraphFollow,
+            "app.bsky.graph.list" => Collections::AppBskyGraphList,
+            "app.bsky.graph.listblock" => Collections::AppBskyGraphListblock,
+            "app.bsky.graph.listitem" => Collections::AppBskyGraphListitem,
+            "app.bsky.graph.starterpack" => Collections::AppBskyGraphStarterpack,
+            "app.bsky.labeler.service" => Collections::AppBskyLabelerService,
+            "chat.bsky.actor.declaration" => Collections::ChatBskyActorDeclaration,
+            _ => return Err(()),
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct CommitOperation<'a, T> {
+    repo: &'a str,
+    path: &'a str,
+    collection: Collections,
+    cid: Option<&'a cid::Cid>,
+    record: T,
+}
+
+#[derive(Debug)]
+pub enum RepoOp<'a> {
+    Create(CommitOperation<'a, KnownRecord>),
+    Update(CommitOperation<'a, KnownRecord>),
+    Delete(CommitOperation<'a, ()>),
+}
+
+pub trait FirehoseHandler {
+    /// Get the last saved cursor. This allows us to resume consuming the firehose where last left off.
+    fn get_last_cursor(&self) -> impl Future<Output = Option<u64>> + Send + Sync {
+        async { None }
+    }
+
+    /// This is called each time an event is processed. The method should return immediately.
+    /// ### Notes
+    /// It is possible for this method to be called with an older cursor, this can be caused due to other threads processing faster.
+    /// You should check that cursor is higher before updating. Be aware - the cursor can also reset by the firehose.
+    fn update_cursor(&self, cursor: u64) -> impl Future<Output = ()> + Send + Sync {
+        async {}
+    }
+
+    fn on_repo_operation<'a>(&self, op: RepoOp<'_>) -> impl Future<Output = ()> + Send + Sync {
+        async {}
+    }
+}
+
+pub struct Firehose<H: FirehoseHandler> {
+    handler: Arc<H>,
+    domain: String,
+
+    firehose_rx: Receiver<Vec<u8>>,
+    firehose_tx: Sender<Vec<u8>>,
+
+    accepted_message_types: MessageTypes,
+    collections: Collections,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Header<'a> {
+    #[serde(rename(deserialize = "t"))]
+    pub _type: Cow<'a, str>,
+    #[serde(rename(deserialize = "op"))]
+    pub _operation: u8,
+}
+
+impl<H: FirehoseHandler> Firehose<H> {
+    pub fn new(firehose_domain: &str, handler: Arc<H>) -> Self {
+        let (firehose_tx, firehose_rx) = flume::bounded::<Vec<u8>>(10_000);
+
+        Self {
+            domain: firehose_domain.to_owned(),
+            handler,
+            firehose_rx,
+            firehose_tx,
+            accepted_message_types: MessageTypes::Commit,
+            collections: Collections::AppBskyFeedPost,
+        }
+    }
+
+    pub fn accept_message_types(mut self, message_types: MessageTypes) -> Self {
+        self.accepted_message_types = message_types;
+        self
+    }
+
+    pub fn accept_collections(mut self, collections: Collections) -> Self {
+        self.collections = collections;
+        self
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn connect_firehose(&self) -> Option<fastwebsockets::WebSocket<reqwest::Upgraded>> {
+        let domain = self.domain.as_str();
+        let cursor = self
+            .handler
+            .get_last_cursor()
+            .await
+            .map_or(String::default(), |v| format!("?cursor={v}"));
+
+        let mut req = reqwest::Request::new(
+            reqwest::Method::GET,
+            format!("https://{domain}/xrpc/com.atproto.sync.subscribeRepos{cursor}")
+                .as_str()
+                .try_into()
+                .ok()?,
+        );
+        req.headers_mut().append(
+            UPGRADE,
+            reqwest::header::HeaderValue::from_static("websocket"),
+        );
+        req.headers_mut().append(
+            USER_AGENT,
+            reqwest::header::HeaderValue::from_static(concat!(
+                "atproto-feedgen/",
+                env!("CARGO_PKG_VERSION"),
+                " (https://github.com/naim94a/bsky-feed)"
+            )),
+        );
+        req.headers_mut().append(
+            CONNECTION,
+            reqwest::header::HeaderValue::from_static("upgrade"),
+        );
+        req.headers_mut().append(
+            SEC_WEBSOCKET_KEY,
+            reqwest::header::HeaderValue::from_str(&fastwebsockets::handshake::generate_key())
+                .unwrap(),
+        );
+        req.headers_mut().append(
+            SEC_WEBSOCKET_VERSION,
+            reqwest::header::HeaderValue::from_static("13"),
+        );
+        let client = reqwest::ClientBuilder::default()
+            // WebSocket doesn't seem to work on 2+
+            .http1_only()
+            .https_only(true)
+            .read_timeout(Duration::from_secs(10))
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .ok()?;
+
+        let response = client.execute(req).await.ok()?.error_for_status().ok()?;
+
+        if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+            error!("unexpected http response: {}", response.status());
+            return None;
+        }
+
+        let upgraded = response.upgrade().await.ok()?;
+        Some(fastwebsockets::WebSocket::after_handshake(
+            upgraded,
+            fastwebsockets::Role::Client,
+        ))
+    }
+
+    /// This method connects to the firehose endpoint and collects events, it should only be called once.
+    /// The primary purpose of this method is to manage the network IO.
+    /// It will automatically re-connect to the firehose endpoint if the connection times out.
+    #[tracing::instrument(skip_all)]
+    pub async fn collect_firehose_events(&self) {
+        'ws: loop {
+            info!("connecting to firehose endpoint...");
+            let firehose = match self.connect_firehose().await {
+                Some(v) => v,
+                None => {
+                    error!("connection failed. retrying in 5s...");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue 'ws;
+                }
+            };
+            info!("firehose connected.");
+            let mut firehose = fastwebsockets::FragmentCollector::new(firehose);
+
+            loop {
+                let v = match timeout(Duration::from_secs(10), firehose.read_frame()).await {
+                    Ok(v) => v,
+                    Err(err) => {
+                        warn!("read_frame timeout. {err}");
+                        return;
+                    }
+                };
+                match v {
+                    Ok(frame) => {
+                        if frame.opcode != fastwebsockets::OpCode::Binary {
+                            warn!("unexpected frame {:?}", frame.opcode);
+                            continue;
+                        }
+                        let payload = frame.payload.to_owned();
+                        if let Err(_e) = self.firehose_tx.send_async(payload).await {
+                            // we're shutting down...
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        error!("websocket error! {e}");
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// This method parses blobs read from the firehouse, and calls their handlers.
+    /// Call this method for each CPU you'd like to process events.
+    pub async fn process_firehose_event(&self) {
+        while let Ok(blob) = self.firehose_rx.recv_async().await {
+            let (_header, message) = match self.read_subscribe_repos(&blob) {
+                None => continue,
+                Some(v) => v,
+            };
+
+            let cursor;
+
+            match message {
+                Message::Commit(commit) => {
+                    cursor = commit.seq;
+                    self.process_commit(*commit).await;
+                }
+                Message::Account(account) => {
+                    cursor = account.seq;
+                }
+                Message::Handle(handle) => {
+                    cursor = handle.seq;
+                }
+                Message::Identity(identity) => {
+                    cursor = identity.seq;
+                }
+                Message::Info(_info) => {
+                    // `seq` is unavailable here...
+                    continue;
+                }
+                Message::Migrate(migrate) => {
+                    cursor = migrate.seq;
+                }
+                Message::Tombstone(tombstone) => {
+                    cursor = tombstone.seq;
+                }
+            };
+
+            self.handler.update_cursor(cursor as u64).await;
+        }
+    }
+
+    async fn parse_commit_blocks(data: &[u8]) -> Option<HashMap<cid::Cid, Vec<u8>>> {
+        let mut res = HashMap::new();
+        let mut buffer = futures::io::Cursor::new(data);
+        let mut car_reader = rs_car::CarReader::new(&mut buffer, false).await.ok()?;
+        while let Some(record) = car_reader.next().await {
+            let (record_cid, record_data) = match record {
+                Ok(v) => v,
+                Err(_) => {
+                    // something failed here?
+                    continue;
+                }
+            };
+            let cid = {
+                let mut record_cid_bytes = [0u8; 256];
+                let mut record_cid_bytes = Cursor::new(record_cid_bytes.as_mut());
+                let bytes_written = match record_cid.write_bytes(&mut record_cid_bytes) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let record_cid_bytes = &record_cid_bytes.into_inner()[..bytes_written];
+                match cid::Cid::read_bytes(Cursor::new(record_cid_bytes)) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                }
+            };
+            res.insert(cid, record_data);
+        }
+        Some(res)
+    }
+
+    async fn process_commit(&self, mut commit: Commit) {
+        let mut blocks = {
+            let mut blocks = Vec::default();
+            std::mem::swap(&mut commit.blocks, &mut blocks);
+            Self::parse_commit_blocks(&blocks)
+                .await
+                .unwrap_or(HashMap::new())
+        };
+
+        for op in commit.ops.iter() {
+            let repo = commit.repo.as_str();
+            let path = op.path.as_str();
+            let collection = match op.path.split('/').next() {
+                None => continue, // this path is malformed.
+                Some(v) => match Collections::from_str(v) {
+                    Ok(v) => v,
+                    Err(_) => continue, // this collection is unknown to us
+                },
+            };
+            if !self.collections.contains(collection) {
+                continue; // collection is ignored.
+            }
+            let cid = op.cid.as_ref().map(|v| &v.0);
+
+            let mut parse_record = || {
+                cid.map(|k| {
+                    blocks
+                        .remove(k)
+                        .map(|record_data| {
+                            serde_cbor::from_slice::<KnownRecord>(record_data.as_ref()).ok()
+                        })
+                        .flatten()
+                })
+                .flatten()
+            };
+
+            let repo_op = match op.action.as_str() {
+                "create" | "update" => {
+                    let record = match parse_record() {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    let co = CommitOperation {
+                        repo,
+                        path,
+                        collection,
+                        cid,
+                        record,
+                    };
+                    if op.action == "create" {
+                        RepoOp::Create(co)
+                    } else if op.action == "update" {
+                        RepoOp::Update(co)
+                    } else {
+                        unreachable!()
+                    }
+                }
+                "delete" => RepoOp::Delete(CommitOperation {
+                    repo,
+                    path,
+                    collection,
+                    cid,
+                    record: (),
+                }),
+                _ => continue,
+            };
+
+            self.handler.on_repo_operation(repo_op).await;
+        }
+    }
+
+    fn read_subscribe_repos(&self, buffer: &[u8]) -> Option<(Header, Message)> {
+        let mut reader = Cursor::new(buffer);
+        let header = ciborium::de::from_reader::<Header, _>(&mut reader).ok()?;
+        let message_type = header._type.as_ref();
+
+        // ignore types we have no intention to use...
+        let message_type = MessageTypes::from_str(message_type).ok()?;
+
+        if !self.accepted_message_types.contains(message_type) {
+            return None;
+        }
+
+        let m = match message_type {
+            MessageTypes::Commit => {
+                Message::Commit(serde_ipld_dagcbor::from_reader(&mut reader).ok()?)
+            }
+            MessageTypes::Handle => {
+                Message::Handle(serde_ipld_dagcbor::from_reader(&mut reader).ok()?)
+            }
+            MessageTypes::Tombstone => {
+                Message::Tombstone(serde_ipld_dagcbor::from_reader(&mut reader).ok()?)
+            }
+            MessageTypes::Account => {
+                Message::Account(serde_ipld_dagcbor::from_reader(&mut reader).ok()?)
+            }
+            MessageTypes::Identity => {
+                Message::Identity(serde_ipld_dagcbor::from_reader(&mut reader).ok()?)
+            }
+            _ => return None,
+        };
+        Some((header, m))
+    }
+}

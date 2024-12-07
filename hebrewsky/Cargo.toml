@@ -35,7 +35,13 @@ cid = "0.11.1"
 console-subscriber = "0.4.0"
 flume = "0.11.0"
 dotenvy = "0.15.7"
-tower-http = { version = "0.5.2", features = ["compression-br", "compression-deflate", "compression-gzip", "compression-zstd", "trace"] }
+tower-http = { version = "0.5.2", features = [
+    "compression-br",
+    "compression-deflate",
+    "compression-gzip",
+    "compression-zstd",
+    "trace",
+] }
 ipld-core = "0.4.1"
 bsky-sdk = "0.1.8"
 axum-extra = { version = "0.9.3", features = ["typed-header"] }

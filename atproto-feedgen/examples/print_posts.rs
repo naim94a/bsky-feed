@@ -1,24 +1,24 @@
 use std::sync::Arc;
 
-use atproto_feedgen::{self, Collections, MessageTypes};
+use atproto_feedgen::{self};
 
 struct MyFeedGenerator;
 impl atproto_feedgen::FirehoseHandler for MyFeedGenerator {
-    async fn get_last_cursor(&self) -> Option<u64> {
+    async fn get_last_cursor(&self) -> Option<i64> {
         None
     }
 
-    async fn update_cursor(&self, cursor: u64) {
+    async fn update_cursor(&self, cursor: i64) {
         if cursor % 10_000 == 0 {
             println!("cursor @ {cursor}");
         }
     }
 
-    async fn on_repo_operation<'a>(&self, op: atproto_feedgen::RepoOp<'_>) {
+    async fn on_repo_operation(&self, op: atproto_feedgen::RepoCommitOp) {
         match op {
-            atproto_feedgen::RepoOp::Create(commit_operation) => {}
-            atproto_feedgen::RepoOp::Update(commit_operation) => {}
-            atproto_feedgen::RepoOp::Delete(commit_operation) => {
+            atproto_feedgen::RepoCommitOp::Create(commit_operation) => {}
+            atproto_feedgen::RepoCommitOp::Update(commit_operation) => {}
+            atproto_feedgen::RepoCommitOp::Delete(commit_operation) => {
                 println!("{commit_operation:?}");
             }
         }

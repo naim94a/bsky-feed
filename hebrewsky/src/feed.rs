@@ -1,15 +1,14 @@
+use atproto_feedgen::Cid;
+use atrium_api::app::bsky::feed::post::RecordData as Post;
+use sqlx::Executor;
 use std::{
     sync::{Arc, OnceLock},
     usize,
 };
-
-use atrium_api::app::bsky::feed::post::RecordData as Post;
-use cid::Cid;
-use sqlx::Executor;
 use tracing::{debug, error, info};
 use whatlang::Lang;
 
-use crate::db::State;
+use crate::{db::State, AtUriParts};
 
 fn is_possibly_hebrew(text: &str) -> bool {
     let hebrew_chars = 'א'..='ת';
@@ -23,19 +22,12 @@ fn get_language(txt: &str) -> Option<whatlang::Lang> {
 }
 
 #[tracing::instrument(skip_all)]
-async fn is_ignored(db: &State, at_uri: &str) -> bool {
-    let did = at_uri.strip_prefix("at://").unwrap_or(at_uri);
-    let mut x = did.splitn(2, '/');
-    let did = match x.next() {
-        None => return true, // invalid uri ...
-        Some(v) => v,
-    };
-
+async fn is_ignored(db: &sqlx::SqlitePool, at_uri: &AtUriParts<'_>) -> bool {
     match sqlx::query!(
         r#"SELECT count(*)>0 as "ignored: i32" FROM ignores WHERE did = ?"#,
-        did
+        at_uri.repo,
     )
-    .fetch_optional(&db.db)
+    .fetch_optional(db)
     .await
     {
         Ok(Some(res)) if res.ignored != 0 => return true,
@@ -48,7 +40,7 @@ async fn is_ignored(db: &State, at_uri: &str) -> bool {
 }
 
 #[tracing::instrument(skip_all)]
-async fn should_add_post(db: &State, at_uri: &str, post: &mut Post) -> bool {
+async fn should_add_post(db: &sqlx::SqlitePool, at_uri: &AtUriParts<'_>, post: &mut Post) -> bool {
     if let Some(ref reply) = post.reply {
         let parent_uri = reply.parent.uri.as_str().strip_prefix("at://");
         let root_uri = reply.root.uri.as_str().strip_prefix("at://");
@@ -58,7 +50,7 @@ async fn should_add_post(db: &State, at_uri: &str, post: &mut Post) -> bool {
             parent_uri,
             root_uri
         )
-        .fetch_optional(&db.db)
+        .fetch_optional(db)
         .await
         {
             Ok(Some(v)) if v.has_anscestors => return true,
@@ -89,7 +81,7 @@ async fn should_add_post(db: &State, at_uri: &str, post: &mut Post) -> bool {
     }
 
     if is_ignored(db, at_uri).await {
-        debug!("DID is ignored: {at_uri}");
+        debug!("DID is ignored: {}", at_uri.repo);
         return false;
     }
 
@@ -126,7 +118,10 @@ async fn should_add_post(db: &State, at_uri: &str, post: &mut Post) -> bool {
             return false;
         }
     } else {
-        debug!("failed to detect language of post {}", &at_uri);
+        debug!(
+            "failed to detect language of post {}/{}",
+            at_uri.repo, at_uri.path
+        );
         return false;
     }
 
@@ -134,10 +129,17 @@ async fn should_add_post(db: &State, at_uri: &str, post: &mut Post) -> bool {
 }
 
 #[tracing::instrument(skip_all)]
-pub async fn process_post(db: &State, at_uri: &str, cid: &Cid, mut post: Post) {
-    if !should_add_post(db, at_uri, &mut post).await {
+pub async fn process_post(
+    db: &sqlx::SqlitePool,
+    at_uri: AtUriParts<'_>,
+    cid: &Cid,
+    mut post: Post,
+) {
+    if !should_add_post(db, &at_uri, &mut post).await {
         return;
     }
+
+    let at_uri = at_uri.to_string();
 
     info!(
         "new post: {}: {:?} - {}",
@@ -150,7 +152,6 @@ pub async fn process_post(db: &State, at_uri: &str, cid: &Cid, mut post: Post) {
     let indexed_at = std::time::UNIX_EPOCH.elapsed().unwrap().as_secs() as i64;
     let created_at = post.created_at.as_ref().timestamp();
     if let Err(e) = db
-        .db
         .execute(sqlx::query!(
             "INSERT INTO post VALUES (?, ?, ?, ?, ?, ?, ?)",
             at_uri,
@@ -168,9 +169,9 @@ pub async fn process_post(db: &State, at_uri: &str, cid: &Cid, mut post: Post) {
 }
 
 #[tracing::instrument(skip_all)]
-pub async fn delete_post(db: &State, at_uri: &str) {
+pub async fn delete_post(db: &sqlx::SqlitePool, at_uri: AtUriParts<'_>) {
+    let at_uri = at_uri.to_string();
     match db
-        .db
         .execute(sqlx::query!("DELETE FROM post WHERE uri = ?", at_uri))
         .await
     {

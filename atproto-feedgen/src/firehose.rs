@@ -17,7 +17,7 @@ use hyper::{
 use reqwest::header::{CONNECTION, UPGRADE};
 use serde::Deserialize;
 use tokio::time::timeout;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 bitflags! {
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -89,24 +89,24 @@ impl FromStr for Collections {
 }
 
 #[derive(Debug)]
-pub struct CommitOperation<'a, T> {
-    repo: &'a str,
-    path: &'a str,
-    collection: Collections,
-    cid: Option<&'a cid::Cid>,
-    record: T,
+pub struct CommitOperation<T> {
+    pub repo: Arc<str>,
+    pub path: Arc<str>,
+    pub collection: Collections,
+    pub cid: Option<cid::Cid>,
+    pub record: T,
 }
 
 #[derive(Debug)]
-pub enum RepoOp<'a> {
-    Create(CommitOperation<'a, KnownRecord>),
-    Update(CommitOperation<'a, KnownRecord>),
-    Delete(CommitOperation<'a, ()>),
+pub enum RepoCommitOp {
+    Create(CommitOperation<KnownRecord>),
+    Update(CommitOperation<KnownRecord>),
+    Delete(CommitOperation<()>),
 }
 
 pub trait FirehoseHandler {
     /// Get the last saved cursor. This allows us to resume consuming the firehose where last left off.
-    fn get_last_cursor(&self) -> impl Future<Output = Option<u64>> + Send + Sync {
+    fn get_last_cursor(&self) -> impl Future<Output = Option<i64>> + Send {
         async { None }
     }
 
@@ -114,16 +114,18 @@ pub trait FirehoseHandler {
     /// ### Notes
     /// It is possible for this method to be called with an older cursor, this can be caused due to other threads processing faster.
     /// You should check that cursor is higher before updating. Be aware - the cursor can also reset by the firehose.
-    fn update_cursor(&self, cursor: u64) -> impl Future<Output = ()> + Send + Sync {
+    fn update_cursor(&self, cursor: i64) -> impl Future<Output = ()> + Send {
+        let _ = cursor;
         async {}
     }
 
-    fn on_repo_operation<'a>(&self, op: RepoOp<'_>) -> impl Future<Output = ()> + Send + Sync {
+    fn on_repo_operation(&self, op: RepoCommitOp) -> impl Future<Output = ()> + Send {
+        let _ = op;
         async {}
     }
 }
 
-pub struct Firehose<H: FirehoseHandler> {
+pub struct Firehose<H: Send + Sync + 'static> {
     handler: Arc<H>,
     domain: String,
 
@@ -135,19 +137,19 @@ pub struct Firehose<H: FirehoseHandler> {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct Header<'a> {
+struct Header<'a> {
     #[serde(rename(deserialize = "t"))]
     pub _type: Cow<'a, str>,
     #[serde(rename(deserialize = "op"))]
     pub _operation: u8,
 }
 
-impl<H: FirehoseHandler> Firehose<H> {
-    pub fn new(firehose_domain: &str, handler: Arc<H>) -> Self {
+impl<H: FirehoseHandler + Send + Sync + 'static> Firehose<H> {
+    pub fn new<A: AsRef<str>>(firehose_domain: A, handler: Arc<H>) -> Self {
         let (firehose_tx, firehose_rx) = flume::bounded::<Vec<u8>>(10_000);
 
         Self {
-            domain: firehose_domain.to_owned(),
+            domain: firehose_domain.as_ref().to_owned(),
             handler,
             firehose_rx,
             firehose_tx,
@@ -156,11 +158,19 @@ impl<H: FirehoseHandler> Firehose<H> {
         }
     }
 
+    /// Set the type of messages to process. By default only commit messages are processed.
     pub fn accept_message_types(mut self, message_types: MessageTypes) -> Self {
         self.accepted_message_types = message_types;
         self
     }
 
+    /// Get the messages queued in
+    pub fn get_queue_pending(&self) -> usize {
+        self.firehose_rx.len()
+    }
+
+    /// If commit messages are processed, this allows to filter known collection types.
+    /// By default only `AppBskyFeedPost` are filtered.
     pub fn accept_collections(mut self, collections: Collections) -> Self {
         self.collections = collections;
         self
@@ -279,42 +289,46 @@ impl<H: FirehoseHandler> Firehose<H> {
 
     /// This method parses blobs read from the firehouse, and calls their handlers.
     /// Call this method for each CPU you'd like to process events.
-    pub async fn process_firehose_event(&self) {
-        while let Ok(blob) = self.firehose_rx.recv_async().await {
-            let (_header, message) = match self.read_subscribe_repos(&blob) {
-                None => continue,
-                Some(v) => v,
-            };
+    pub fn process_firehose_event(
+        self: Arc<Self>,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        async move {
+            while let Ok(blob) = self.firehose_rx.recv_async().await {
+                let (_header, message) = match self.read_subscribe_repos(&blob) {
+                    None => continue,
+                    Some(v) => v,
+                };
 
-            let cursor;
+                let cursor;
 
-            match message {
-                Message::Commit(commit) => {
-                    cursor = commit.seq;
-                    self.process_commit(*commit).await;
-                }
-                Message::Account(account) => {
-                    cursor = account.seq;
-                }
-                Message::Handle(handle) => {
-                    cursor = handle.seq;
-                }
-                Message::Identity(identity) => {
-                    cursor = identity.seq;
-                }
-                Message::Info(_info) => {
-                    // `seq` is unavailable here...
-                    continue;
-                }
-                Message::Migrate(migrate) => {
-                    cursor = migrate.seq;
-                }
-                Message::Tombstone(tombstone) => {
-                    cursor = tombstone.seq;
-                }
-            };
+                match message {
+                    Message::Commit(commit) => {
+                        cursor = commit.seq;
+                        self.process_commit(*commit).await;
+                    }
+                    Message::Account(v) => {
+                        cursor = v.seq;
+                    }
+                    Message::Handle(v) => {
+                        cursor = v.seq;
+                    }
+                    Message::Identity(identity) => {
+                        cursor = identity.seq;
+                    }
+                    Message::Migrate(migrate) => {
+                        cursor = migrate.seq;
+                    }
+                    Message::Tombstone(tombstone) => {
+                        cursor = tombstone.seq;
+                    }
+                    Message::Info(_info) => {
+                        // `seq` is unavailable here...
+                        continue;
+                    }
+                };
 
-            self.handler.update_cursor(cursor as u64).await;
+                self.handler.update_cursor(cursor).await;
+            }
         }
     }
 
@@ -350,32 +364,40 @@ impl<H: FirehoseHandler> Firehose<H> {
 
     async fn process_commit(&self, mut commit: Commit) {
         let mut blocks = {
-            let mut blocks = Vec::default();
-            std::mem::swap(&mut commit.blocks, &mut blocks);
+            let blocks = std::mem::take(&mut commit.blocks);
             Self::parse_commit_blocks(&blocks)
                 .await
                 .unwrap_or(HashMap::new())
         };
 
-        for op in commit.ops.iter() {
-            let repo = commit.repo.as_str();
-            let path = op.path.as_str();
-            let collection = match op.path.split('/').next() {
+        let repo = commit.repo.as_str().to_owned().into_boxed_str();
+        let repo: Arc<str> = Arc::from(repo);
+
+        let ops = std::mem::take(&mut commit.ops);
+
+        for mut op in ops.into_iter() {
+            let path = std::mem::take(&mut op.path);
+            let path: Arc<str> = Arc::from(path.into_boxed_str());
+            let collection = match path.split('/').next() {
                 None => continue, // this path is malformed.
                 Some(v) => match Collections::from_str(v) {
                     Ok(v) => v,
-                    Err(_) => continue, // this collection is unknown to us
+                    Err(_) => {
+                        debug!("unknown collection '{v}'");
+                        continue;
+                    } // this collection is unknown to us
                 },
             };
             if !self.collections.contains(collection) {
+                trace!("collection {collection:?} is ignored");
                 continue; // collection is ignored.
             }
-            let cid = op.cid.as_ref().map(|v| &v.0);
+            let cid = std::mem::take(&mut op.cid).map(|v| v.0);
 
             let mut parse_record = || {
                 cid.map(|k| {
                     blocks
-                        .remove(k)
+                        .remove(&k)
                         .map(|record_data| {
                             serde_cbor::from_slice::<KnownRecord>(record_data.as_ref()).ok()
                         })
@@ -383,6 +405,8 @@ impl<H: FirehoseHandler> Firehose<H> {
                 })
                 .flatten()
             };
+
+            let repo = repo.clone();
 
             let repo_op = match op.action.as_str() {
                 "create" | "update" => {
@@ -398,21 +422,24 @@ impl<H: FirehoseHandler> Firehose<H> {
                         record,
                     };
                     if op.action == "create" {
-                        RepoOp::Create(co)
+                        RepoCommitOp::Create(co)
                     } else if op.action == "update" {
-                        RepoOp::Update(co)
+                        RepoCommitOp::Update(co)
                     } else {
                         unreachable!()
                     }
                 }
-                "delete" => RepoOp::Delete(CommitOperation {
+                "delete" => RepoCommitOp::Delete(CommitOperation {
                     repo,
                     path,
                     collection,
                     cid,
                     record: (),
                 }),
-                _ => continue,
+                a => {
+                    warn!("unknown repo action '{a}'");
+                    continue;
+                }
             };
 
             self.handler.on_repo_operation(repo_op).await;

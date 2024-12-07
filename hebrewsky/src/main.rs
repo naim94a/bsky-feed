@@ -1,13 +1,103 @@
-use std::{ops::Sub, time::Duration};
+use std::{ops::Sub, sync::Arc, time::Duration};
 
+use atproto_feedgen::{self, Collections, Firehose};
 use sqlx::Executor;
+use tokio::sync::Mutex;
 use tracing::{error, info, instrument::WithSubscriber, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod db;
 mod feed;
-mod firehose;
 mod web;
+
+struct FirehoseProcessor {
+    db: sqlx::SqlitePool,
+    last_cursor_rx: Mutex<tokio::sync::watch::Receiver<i64>>,
+    last_cursor_tx: tokio::sync::watch::Sender<i64>,
+}
+
+impl FirehoseProcessor {
+    pub fn new(db: sqlx::SqlitePool) -> Self {
+        let (last_cursor_tx, last_cursor_rx) = tokio::sync::watch::channel(0);
+        Self {
+            db,
+            last_cursor_rx: tokio::sync::Mutex::new(last_cursor_rx),
+            last_cursor_tx,
+        }
+    }
+
+    async fn get_last_cursor(&self) -> i64 {
+        let mut rx = self.last_cursor_rx.lock().await;
+        let v = rx.borrow_and_update();
+        *v
+    }
+}
+
+struct AtUriParts<'a> {
+    repo: &'a str,
+    path: &'a str,
+}
+impl ToString for AtUriParts<'_> {
+    fn to_string(&self) -> String {
+        format!("{}/{}", self.repo, self.path)
+    }
+}
+
+impl atproto_feedgen::FirehoseHandler for FirehoseProcessor {
+    async fn get_last_cursor(&self) -> Option<i64> {
+        match self
+            .db
+            .fetch_optional(sqlx::query!(
+                "SELECT cursor FROM subscriber_state WHERE service='hebrewsky'"
+            ))
+            .await
+        {
+            Err(_) | Ok(None) => None,
+            Ok(Some(v)) => {
+                use sqlx::Row;
+                let r: i64 = v.get(0);
+                info!("starting with cursor {r}");
+                Some(r)
+            }
+        }
+    }
+
+    async fn update_cursor(&self, cursor: i64) {
+        if cursor % 100 == 0 {
+            self.last_cursor_tx.send_modify(|v| *v = cursor);
+        }
+    }
+
+    async fn on_repo_operation(&self, op: atproto_feedgen::RepoCommitOp) {
+        match op {
+            atproto_feedgen::RepoCommitOp::Create(commit) => match commit.record {
+                atrium_api::record::KnownRecord::AppBskyFeedPost(post) => {
+                    let atp = AtUriParts {
+                        repo: &commit.repo,
+                        path: &commit.path,
+                    };
+                    if let Some(cid) = &commit.cid {
+                        let post = post.data;
+                        feed::process_post(&self.db, atp, cid, post).await;
+                    } else {
+                        panic!("no cid!");
+                    }
+                }
+                _ => {}
+            },
+            atproto_feedgen::RepoCommitOp::Delete(commit)
+                if commit.collection == Collections::AppBskyFeedPost =>
+            {
+                let atp = AtUriParts {
+                    repo: &commit.repo,
+                    path: &commit.path,
+                };
+                feed::delete_post(&self.db, atp).await;
+            }
+            _ => {}
+        }
+    }
+}
 
 #[tracing::instrument(skip_all)]
 async fn flush_cursor(db: &sqlx::Pool<sqlx::Sqlite>, seq: i64) {
@@ -39,31 +129,18 @@ async fn main() {
 
     let state = db::new().await;
     let state_server = state.clone();
-    let (last_seq_tx, mut last_seq_rx) = tokio::sync::watch::channel(0);
 
-    let mut last_seq_rx2 = last_seq_rx.clone();
-    let db2 = state.db.clone();
+    let firehose_handler = Arc::new(FirehoseProcessor::new(state.db.clone()));
+    let firehose = Arc::new(Firehose::new("bsky.network", firehose_handler.clone()));
+
+    let server_firehose = firehose.clone();
+    let server_fh = firehose_handler.clone();
     let server = async move {
-        let (tx, rx) = flume::bounded(10_000);
         tokio::task::spawn(async move {
             loop {
-                let last_cursor = match db2
-                    .fetch_optional(sqlx::query!(
-                        "SELECT cursor FROM subscriber_state WHERE service='hebrewsky'"
-                    ))
-                    .await
-                {
-                    Err(_) | Ok(None) => None,
-                    Ok(Some(v)) => {
-                        use sqlx::Row;
-                        let r: i64 = v.get(0);
-                        info!("starting with cursor {r}");
-                        Some(r)
-                    }
-                };
-                firehose::collect_firehose_events(tx.clone(), last_cursor)
-                    .with_current_subscriber()
-                    .await;
+                server_firehose.collect_firehose_events().await;
+                warn!("firehose error; will reconnect.");
+                tokio::time::sleep(Duration::from_secs(10)).await;
             }
         });
 
@@ -74,7 +151,7 @@ async fn main() {
                 let mut interval = tokio::time::interval(Duration::from_secs(10));
                 loop {
                     interval.tick().await;
-                    let seq = *last_seq_rx2.borrow_and_update();
+                    let seq = server_fh.get_last_cursor().await;
                     if let Some(last_seq) = last_seq {
                         if seq == last_seq {
                             warn!("sequence number didn't change! seq = {last_seq}");
@@ -122,31 +199,19 @@ async fn main() {
             .with_current_subscriber(),
         );
 
-        let mut workers = vec![];
         // create workers in order not to exhaust the heap with tasks...
+        let mut workers = vec![];
         for _ in 0..32 {
-            let last_seq_tx = last_seq_tx.clone();
-            let rx = rx.clone();
-            let state_server = state_server.clone();
-            let h = tokio::spawn(
-                async move {
-                    while let Ok(evt) = rx.recv_async().await {
-                        let seq = firehose::process_firehose_blob(state_server.clone(), evt)
-                            .with_current_subscriber()
-                            .await;
-                        if let Some(seq) = seq {
-                            last_seq_tx.send_modify(|v| *v = seq);
-                        }
-                    }
-                }
-                .with_current_subscriber(),
-            );
+            let firehose = firehose.clone();
+            let h = tokio::spawn(async move {
+                firehose.process_firehose_event().await;
+            });
             workers.push(h);
         }
         let mut dur = tokio::time::interval(Duration::from_secs(1));
         loop {
             let _ = dur.tick().await;
-            let jobs = rx.len();
+            let jobs = firehose.get_queue_pending();
             if jobs > 0 {
                 info!("{jobs:5} jobs queued");
             }
@@ -166,7 +231,8 @@ async fn main() {
         }
     }
 
-    flush_cursor(&state.db, *last_seq_rx.borrow_and_update()).await;
+    let cursor = firehose_handler.get_last_cursor().await;
+    flush_cursor(&state.db, cursor).await;
     state.db.close().await;
     info!("bye.");
 }

@@ -91,7 +91,7 @@ async fn should_add_post(db: &sqlx::SqlitePool, at_uri: &AtUriParts<'_>, post: &
     }
 
     if is_ignored(db, at_uri).await {
-        debug!("DID is ignored: {}", at_uri.repo);
+        debug!("DID is ignored: {at_uri}");
         return false;
     }
 
@@ -128,10 +128,7 @@ async fn should_add_post(db: &sqlx::SqlitePool, at_uri: &AtUriParts<'_>, post: &
             return false;
         }
     } else {
-        debug!(
-            "failed to detect language of post {}/{}",
-            at_uri.repo, at_uri.path
-        );
+        debug!("failed to detect language of post {at_uri}",);
         return false;
     }
 
@@ -149,7 +146,7 @@ pub async fn process_post(
         return;
     }
 
-    let at_repo_path = match at_uri.path.strip_prefix("/app.bsky.feed.post/") {
+    let at_repo_path = match at_uri.path.strip_prefix("app.bsky.feed.post/") {
         Some(v) => v,
         None => {
             if cfg!(debug_assertions) {

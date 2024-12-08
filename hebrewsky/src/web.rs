@@ -146,7 +146,7 @@ async fn get_feed_skeleton(
                             cursor = row.indexed;
                             let post = atrium_api::app::bsky::feed::defs::SkeletonFeedPostData {
                                 feed_context: None,
-                                post: format!("at://{}/bsky.app.feed.post/{}", row.repo, row.post_path),
+                                post: format!("at://{}/app.bsky.feed.post/{}", row.repo, row.post_path),
                                 reason: None,
                             };
                             post.into()

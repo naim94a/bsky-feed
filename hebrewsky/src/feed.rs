@@ -8,7 +8,7 @@ use std::{
 use tracing::{debug, error, info};
 use whatlang::Lang;
 
-use crate::{db::State, AtUriParts};
+use crate::AtUriParts;
 
 fn is_possibly_hebrew(text: &str) -> bool {
     let hebrew_chars = 'א'..='ת';

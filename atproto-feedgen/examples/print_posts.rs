@@ -16,8 +16,8 @@ impl atproto_feedgen::FirehoseHandler for MyFeedGenerator {
 
     async fn on_repo_operation(&self, op: atproto_feedgen::RepoCommitOp) {
         match op {
-            atproto_feedgen::RepoCommitOp::Create(commit_operation) => {}
-            atproto_feedgen::RepoCommitOp::Update(commit_operation) => {}
+            atproto_feedgen::RepoCommitOp::Create(_) => {}
+            atproto_feedgen::RepoCommitOp::Update(_) => {}
             atproto_feedgen::RepoCommitOp::Delete(commit_operation) => {
                 println!("{commit_operation:?}");
             }

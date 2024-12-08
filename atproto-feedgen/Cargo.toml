@@ -15,7 +15,7 @@ fastwebsockets = { version = "0.8.0", features = ["upgrade"] }
 futures = "0.3.30"
 serde = { version = "1.0.209", features = ["derive"] }
 flume = "0.11.0"
-hyper = { version = "1.4.1", features = ["full"] }
+hyper = { version = "1.4.1", default-features = false, features = ["client"] }
 reqwest = { version = "0.12.7", default-features = false, features = [
     "rustls-tls-webpki-roots",
     "rustls-tls",
@@ -25,9 +25,9 @@ ciborium = "0.2.2"
 serde_cbor = "0.11.2"
 serde_ipld_dagcbor = "0.6.1"
 rs-car = "0.4.1"
-tokio = { version = "1.40.0", default-features = false, features = ["time"] }
+tokio = { version = "1.42.0", default-features = false, features = ["time"] }
 bitflags = "2.6.0"
 cid = "0.11.1"
 
 [dev-dependencies]
-tokio = { version = "1.40.0", features = ["full"] }
+tokio = { version = "1.42.0", features = ["full"] }

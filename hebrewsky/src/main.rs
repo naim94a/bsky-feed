@@ -1,6 +1,8 @@
+#![deny(unused_crate_dependencies)]
+
 use std::{ops::Sub, sync::Arc, time::Duration};
 
-use atproto_feedgen::{self, Collections, Firehose};
+use atproto_feedgen::{self, Collections, Firehose, MessageTypes};
 use sqlx::Executor;
 use tokio::sync::Mutex;
 use tracing::{error, info, instrument::WithSubscriber, warn};
@@ -63,9 +65,7 @@ impl atproto_feedgen::FirehoseHandler for FirehoseProcessor {
     }
 
     async fn update_cursor(&self, cursor: i64) {
-        if cursor % 100 == 0 {
-            self.last_cursor_tx.send_modify(|v| *v = cursor);
-        }
+        self.last_cursor_tx.send_modify(|v| *v = cursor);
     }
 
     async fn on_repo_operation(&self, op: atproto_feedgen::RepoCommitOp) {
@@ -131,7 +131,11 @@ async fn main() {
     let state_server = state.clone();
 
     let firehose_handler = Arc::new(FirehoseProcessor::new(state.db.clone()));
-    let firehose = Arc::new(Firehose::new("bsky.network", firehose_handler.clone()));
+    let firehose = Arc::new(
+        Firehose::new("bsky.network", firehose_handler.clone())
+            .accept_message_types(MessageTypes::Commit | MessageTypes::Info)
+            .accept_collections(Collections::AppBskyFeedPost),
+    );
 
     let server_firehose = firehose.clone();
     let server_fh = firehose_handler.clone();
@@ -201,7 +205,7 @@ async fn main() {
 
         // create workers in order not to exhaust the heap with tasks...
         let mut workers = vec![];
-        for _ in 0..32 {
+        for _ in 0..8 {
             let firehose = firehose.clone();
             let h = tokio::spawn(async move {
                 firehose.process_firehose_event().await;

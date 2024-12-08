@@ -2,3 +2,7 @@
 resolver = "2"
 
 members = ["atproto-feedgen", "hebrewsky"]
+
+[profile.release]
+lto = 'fat'
+codegen-units = 1

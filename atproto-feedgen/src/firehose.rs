@@ -11,10 +11,9 @@ use bitflags::bitflags;
 use flume::{Receiver, Sender};
 use futures::StreamExt;
 use hyper::{
-    header::{SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, USER_AGENT},
+    header::{CONNECTION, SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, UPGRADE, USER_AGENT},
     StatusCode,
 };
-use reqwest::header::{CONNECTION, UPGRADE};
 use serde::Deserialize;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};

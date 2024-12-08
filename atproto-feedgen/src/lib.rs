@@ -1,3 +1,5 @@
+#![deny(unused_crate_dependencies)]
+
 pub use atrium_api;
 
 mod firehose;

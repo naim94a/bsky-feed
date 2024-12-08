@@ -17,7 +17,7 @@ use hyper::{
 use reqwest::header::{CONNECTION, UPGRADE};
 use serde::Deserialize;
 use tokio::time::timeout;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 
 bitflags! {
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -98,7 +98,7 @@ impl FromStr for Collections {
 #[derive(Debug)]
 pub struct CommitOperation<T> {
     pub repo: Arc<str>,
-    pub path: Arc<str>,
+    pub path: String,
     pub collection: Collections,
     pub cid: Option<cid::Cid>,
     pub record: T,
@@ -383,9 +383,7 @@ impl<H: FirehoseHandler + Send + Sync + 'static> Firehose<H> {
         let ops = std::mem::take(&mut commit.ops);
 
         for mut op in ops.into_iter() {
-            let path = std::mem::take(&mut op.path);
-            let path: Arc<str> = Arc::from(path.into_boxed_str());
-            let collection = match path.split('/').next() {
+            let collection = match op.path.split('/').next() {
                 None => continue, // this path is malformed.
                 Some(v) => match Collections::from_str(v) {
                     Ok(v) => v,
@@ -396,9 +394,10 @@ impl<H: FirehoseHandler + Send + Sync + 'static> Firehose<H> {
                 },
             };
             if !self.collections.contains(collection) {
-                trace!("collection {collection:?} is ignored");
                 continue; // collection is ignored.
             }
+
+            let path = std::mem::take(&mut op.path);
             let cid = std::mem::take(&mut op.cid).map(|v| v.0);
 
             let mut parse_record = || {

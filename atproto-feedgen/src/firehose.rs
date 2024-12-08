@@ -23,10 +23,12 @@ bitflags! {
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
         pub struct MessageTypes: u32 {
             const Commit = 1 << 0;
-            const Handle = 1 << 1;
-            const Tombstone = 1 << 2;
-            const Account = 1 << 3;
-            const Identity = 1 << 4;
+            const Identity = 1 << 1;
+            const Account = 1 << 2;
+            const Handle = 1 << 3;
+            const Migrate = 1 << 4;
+            const Tombstone = 1 << 5;
+            const Info = 1 << 6;
         }
 
         #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -54,11 +56,16 @@ impl FromStr for MessageTypes {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
             "#commit" => MessageTypes::Commit,
-            "#handle" => MessageTypes::Handle,
-            "#tombstone" => MessageTypes::Tombstone,
-            "#account" => MessageTypes::Account,
             "#identity" => MessageTypes::Identity,
-            _ => return Err(()),
+            "#account" => MessageTypes::Account,
+            "#handle" => MessageTypes::Handle,
+            "#migrate" => MessageTypes::Migrate,
+            "#tombstone" => MessageTypes::Tombstone,
+            "#info" => MessageTypes::Info,
+            _ => {
+                error!("Unknown message type from firehose: '{s}'");
+                return Err(());
+            }
         })
     }
 }
@@ -321,8 +328,8 @@ impl<H: FirehoseHandler + Send + Sync + 'static> Firehose<H> {
                     Message::Tombstone(tombstone) => {
                         cursor = tombstone.seq;
                     }
-                    Message::Info(_info) => {
-                        // `seq` is unavailable here...
+                    Message::Info(info) => {
+                        info!("message from firehose: '{info:?}'");
                         continue;
                     }
                 };
@@ -462,19 +469,23 @@ impl<H: FirehoseHandler + Send + Sync + 'static> Firehose<H> {
             MessageTypes::Commit => {
                 Message::Commit(serde_ipld_dagcbor::from_reader(&mut reader).ok()?)
             }
-            MessageTypes::Handle => {
-                Message::Handle(serde_ipld_dagcbor::from_reader(&mut reader).ok()?)
-            }
-            MessageTypes::Tombstone => {
-                Message::Tombstone(serde_ipld_dagcbor::from_reader(&mut reader).ok()?)
+            MessageTypes::Identity => {
+                Message::Identity(serde_ipld_dagcbor::from_reader(&mut reader).ok()?)
             }
             MessageTypes::Account => {
                 Message::Account(serde_ipld_dagcbor::from_reader(&mut reader).ok()?)
             }
-            MessageTypes::Identity => {
-                Message::Identity(serde_ipld_dagcbor::from_reader(&mut reader).ok()?)
+            MessageTypes::Handle => {
+                Message::Handle(serde_ipld_dagcbor::from_reader(&mut reader).ok()?)
             }
-            _ => return None,
+            MessageTypes::Migrate => {
+                Message::Migrate(serde_ipld_dagcbor::from_reader(&mut reader).ok()?)
+            }
+            MessageTypes::Tombstone => {
+                Message::Tombstone(serde_ipld_dagcbor::from_reader(&mut reader).ok()?)
+            }
+            MessageTypes::Info => Message::Info(serde_ipld_dagcbor::from_reader(&mut reader).ok()?),
+            _ => unreachable!("unknown message type"),
         };
         Some((header, m))
     }

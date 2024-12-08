@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT count(*)>0 as \"has_anscestors: bool\" FROM post WHERE (repo = ? AND post_path = ?) OR (repo = ? AND post_path = ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "has_anscestors: bool",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5dc4ab03b2169b7e9121ad6a7850fc5a981385acbdf532d27598868c02101686"
+}

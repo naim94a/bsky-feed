@@ -39,16 +39,26 @@ async fn is_ignored(db: &sqlx::SqlitePool, at_uri: &AtUriParts<'_>) -> bool {
     }
 }
 
+fn split_uri(uri: &str) -> Option<(&str, &str)> {
+    let uri = uri.strip_prefix("at://")?;
+    let mut s = uri.splitn(2, "/app.bsky.feed.post/");
+    Some((s.next()?, s.next()?))
+}
+
 #[tracing::instrument(skip_all)]
 async fn should_add_post(db: &sqlx::SqlitePool, at_uri: &AtUriParts<'_>, post: &mut Post) -> bool {
     if let Some(ref reply) = post.reply {
-        let parent_uri = reply.parent.uri.as_str().strip_prefix("at://");
-        let root_uri = reply.root.uri.as_str().strip_prefix("at://");
+        let (parent_repo, parent_path) = split_uri(reply.parent.uri.as_str())
+            .map(|v| (Some(v.0), Some(v.1)))
+            .unwrap_or_default();
+        let (root_repo, root_path) = split_uri(reply.root.uri.as_str())
+            .map(|v| (Some(v.0), Some(v.1)))
+            .unwrap_or_default();
 
         match sqlx::query!(
-            r#"SELECT count(*)>0 as "has_anscestors: bool" FROM post WHERE uri = ? OR uri = ?"#,
-            parent_uri,
-            root_uri
+            r#"SELECT count(*)>0 as "has_anscestors: bool" FROM post WHERE (repo = ? AND post_path = ?) OR (repo = ? AND post_path = ?)"#,
+            parent_repo, parent_path,
+            root_repo, root_path,
         )
         .fetch_optional(db)
         .await
@@ -139,7 +149,15 @@ pub async fn process_post(
         return;
     }
 
-    let at_uri = at_uri.to_string();
+    let at_repo_path = match at_uri.path.strip_prefix("/app.bsky.feed.post/") {
+        Some(v) => v,
+        None => {
+            if cfg!(debug_assertions) {
+                unreachable!("non app.bsky.feed.post reached process_post");
+            }
+            return;
+        }
+    };
 
     info!(
         "new post: {}: {:?} - {}",
@@ -153,8 +171,14 @@ pub async fn process_post(
     let created_at = post.created_at.as_ref().timestamp();
     if let Err(e) = db
         .execute(sqlx::query!(
-            "INSERT INTO post VALUES (?, ?, ?, ?, ?, ?, ?)",
-            at_uri,
+            r#"INSERT INTO post (
+                repo, post_path, cid,
+                reply_root, reply_to,
+                language,
+                indexed_dt, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
+            at_uri.repo,
+            at_repo_path,
             cid,
             reply_root,
             reply_to,
@@ -170,9 +194,12 @@ pub async fn process_post(
 
 #[tracing::instrument(skip_all)]
 pub async fn delete_post(db: &sqlx::SqlitePool, at_uri: AtUriParts<'_>) {
-    let at_uri = at_uri.to_string();
     match db
-        .execute(sqlx::query!("DELETE FROM post WHERE uri = ?", at_uri))
+        .execute(sqlx::query!(
+            "DELETE FROM post WHERE repo = ? AND post_path = ?",
+            at_uri.repo,
+            at_uri.path
+        ))
         .await
     {
         Err(e) => tracing::error!("failed to delete post from db: {}", e),

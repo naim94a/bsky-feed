@@ -128,7 +128,7 @@ async fn get_feed_skeleton(
             };
             let mut cursor = None;
             match sqlx::query!(
-                r#"SELECT uri, indexed_dt as "indexed: i64" FROM post WHERE (? is NULL OR indexed_dt < ?) ORDER BY (indexed_dt/60) DESC, created_at DESC LIMIT ?"#,
+                r#"SELECT repo, post_path, indexed_dt as "indexed: i64" FROM post WHERE (? is NULL OR indexed_dt < ?) ORDER BY (indexed_dt/60) DESC, created_at DESC LIMIT ?"#,
                 start_cursor,
                 start_cursor,
                 limit
@@ -146,7 +146,7 @@ async fn get_feed_skeleton(
                             cursor = row.indexed;
                             let post = atrium_api::app::bsky::feed::defs::SkeletonFeedPostData {
                                 feed_context: None,
-                                post: format!("at://{}", row.uri),
+                                post: format!("at://{}/bsky.app.feed.post/{}", row.repo, row.post_path),
                                 reason: None,
                             };
                             post.into()

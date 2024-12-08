@@ -39,9 +39,9 @@ struct AtUriParts<'a> {
     repo: &'a str,
     path: &'a str,
 }
-impl ToString for AtUriParts<'_> {
-    fn to_string(&self) -> String {
-        format!("{}/{}", self.repo, self.path)
+impl core::fmt::Display for AtUriParts<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "at://{}/{}", self.repo, self.path)
     }
 }
 

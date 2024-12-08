@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM post WHERE indexed_dt < ? OR (created_at is not NULL AND created_at < ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "1e57562bf92e8a61d075cf91ba42554133406e0cdaf2b469bfc95d18c0ab4024"
+}

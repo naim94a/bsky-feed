@@ -1,14 +1,15 @@
-use std::i64;
-use std::sync::OnceLock;
+use std::sync::Arc;
 
 use crate::db::State;
-use atrium_api::app::bsky::feed::describe_feed_generator;
+use atproto_feedgen::FeedManager;
 use atrium_api::app::bsky::feed::get_feed_skeleton;
 use atrium_api::types::string::Did;
-use axum::Json;
+use hyper::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
 use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
+use tracing::debug;
 use tracing::{error, trace};
 
 use axum::async_trait;
@@ -18,37 +19,9 @@ use hyper::header;
 
 #[derive(Serialize)]
 #[serde(untagged)]
-enum GetFeedSkeletorResult {
+enum GetFeedSkeletonResult {
     Ok(get_feed_skeleton::OutputData),
     Err(get_feed_skeleton::Error),
-}
-
-struct StaticRes {
-    hostname: &'static str,
-    did: &'static str,
-    feed_prefix: &'static str,
-    uri: &'static str,
-}
-
-const FEEDS: &[&str] = &["hebrew-feed"];
-
-fn get_res() -> &'static StaticRes {
-    static RES: OnceLock<StaticRes> = OnceLock::new();
-    RES.get_or_init(|| {
-        let hostname = String::leak(std::env::var("FEEDGEN_HOSTNAME").unwrap());
-        let did = String::leak(format!("did:web:{hostname}"));
-        let uri = String::leak(format!("https://{hostname}"));
-        let feed_prefix = String::leak(format!(
-            "at://{}/app.bsky.feed.generator/",
-            std::env::var("OWNER_DID").unwrap()
-        ));
-        StaticRes {
-            hostname,
-            did,
-            uri,
-            feed_prefix,
-        }
-    })
 }
 
 #[derive(Deserialize, Debug)]
@@ -106,117 +79,107 @@ impl<S> FromRequestParts<S> for AuthExtractor {
 }
 
 async fn get_feed_skeleton(
-    axum::extract::State(s): axum::extract::State<State>,
+    axum::extract::State(feed_mgr): axum::extract::State<Arc<FeedManager<sqlx::SqlitePool>>>,
     axum::extract::Query(q): axum::extract::Query<get_feed_skeleton::ParametersData>,
     _auth: Option<AuthExtractor>,
-) -> axum::Json<GetFeedSkeletorResult> {
+) -> axum::Json<GetFeedSkeletonResult> {
     let requested_feed = q.feed.as_str();
-    if !requested_feed.starts_with(get_res().feed_prefix) {
-        return GetFeedSkeletorResult::Err(get_feed_skeleton::Error::UnknownFeed(None)).into();
-    }
-    let requested_feed = requested_feed.split_at(get_res().feed_prefix.len()).1;
-    match requested_feed {
-        "hebrew-feed" => {
-            let mut feed = vec![];
-            let limit = q.limit.map(|v| u8::from(v)).unwrap_or(100) as i32;
-            let start_cursor = match q.cursor {
-                None => None,
-                Some(v) => match v.parse::<i64>() {
-                    Ok(v) => Some(v),
-                    Err(_) => None,
-                },
-            };
-            let mut cursor = None;
-            match sqlx::query!(
-                r#"SELECT repo, post_path, indexed_dt as "indexed: i64" FROM post WHERE (? is NULL OR indexed_dt < ?) ORDER BY (indexed_dt/60) DESC, created_at DESC LIMIT ?"#,
-                start_cursor,
-                start_cursor,
-                limit
-            )
-            .fetch_all(&s.db)
-            .await
-            {
-                Err(err) => {
-                    error!("db error: {err}");
-                }
-                Ok(rows) => {
-                    feed = rows
-                        .into_iter()
-                        .map(|row| {
-                            cursor = row.indexed;
-                            let post = atrium_api::app::bsky::feed::defs::SkeletonFeedPostData {
-                                feed_context: None,
-                                post: format!("at://{}/app.bsky.feed.post/{}", row.repo, row.post_path),
-                                reason: None,
-                            };
-                            post.into()
-                        })
-                        .collect();
-                }
-            }
-            if limit > feed.len() as i32 || cursor == start_cursor {
-                cursor = None;
-            }
-            GetFeedSkeletorResult::Ok(get_feed_skeleton::OutputData {
-                cursor: cursor.map(|v| v.to_string()),
-                feed,
-            })
-            .into()
+    let requested_feed = match requested_feed.strip_prefix(feed_mgr.get_feed_prefix()) {
+        Some(v) => v,
+        None => {
+            debug!("unknown feed requested: {requested_feed}");
+            return GetFeedSkeletonResult::Err(get_feed_skeleton::Error::UnknownFeed(None)).into();
         }
-        _ => GetFeedSkeletorResult::Err(get_feed_skeleton::Error::UnknownFeed(None)).into(),
+    };
+    let limit = q.limit.map(|v| u8::from(v)).unwrap_or(30) as u32;
+
+    let posts = feed_mgr.fetch_posts(requested_feed, None, limit, q.cursor);
+    match posts.await {
+        Ok(v) => GetFeedSkeletonResult::Ok(v).into(),
+        Err(e) => GetFeedSkeletonResult::Err(e).into(),
     }
 }
 
-pub async fn describe_feed_generator() -> Json<describe_feed_generator::OutputData> {
-    let feeds = FEEDS
-        .iter()
-        .map(|&feed| {
-            describe_feed_generator::FeedData {
-                uri: format!("{}{feed}", get_res().feed_prefix),
-            }
-            .into()
-        })
-        .collect();
-    Json(describe_feed_generator::OutputData {
-        did: Did::new(format!("did:web:{}", get_res().hostname)).unwrap(),
-        feeds,
-        links: None,
-    })
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WellKnownDidService {
-    id: &'static str,
-    #[serde(rename = "type")]
-    type_: &'static str,
-    service_endpoint: &'static str,
-}
-
-#[derive(Serialize)]
-struct WellKnownDid {
-    #[serde(rename = "@context")]
-    context_: &'static [&'static str],
-    id: &'static str,
-    service: [WellKnownDidService; 1],
+pub async fn describe_feed_generator(
+    axum::extract::State(feed_mgr): axum::extract::State<Arc<FeedManager<SqlitePool>>>,
+) -> axum::response::Response {
+    let body = axum::body::Body::from(feed_mgr.describe());
+    axum::response::Response::builder()
+        .header(CONTENT_TYPE, "application/json")
+        .body(body)
+        .expect("failed to create response")
 }
 
 async fn well_known_did(
-    axum::extract::State(_s): axum::extract::State<State>,
-) -> Json<WellKnownDid> {
-    let svc = WellKnownDidService {
-        id: "#bsky_fg",
-        type_: "BskyFeedGenerator",
-        service_endpoint: get_res().uri,
-    };
-    Json(WellKnownDid {
-        context_: &["https://www.w3.org/ns/did/v1"],
-        id: get_res().did,
-        service: [svc],
-    })
+    axum::extract::State(feed_mgr): axum::extract::State<Arc<FeedManager<SqlitePool>>>,
+) -> axum::response::Response {
+    let body = axum::body::Body::from(feed_mgr.well_known_did());
+    axum::response::Response::builder()
+        .header(CONTENT_TYPE, "application/json")
+        .body(body)
+        .expect("failed to create response")
 }
 
 pub async fn web_server(state: State) {
+    let feedgen_hostname = std::env::var("FEEDGEN_HOSTNAME").unwrap();
+    let owner_did = std::env::var("OWNER_DID").unwrap();
+    let x = state.db.clone();
+    let mut feed_mgr = FeedManager::new(
+        Did::new(format!("did:web:{feedgen_hostname}")).unwrap(),
+        Did::new(owner_did).unwrap(),
+        &feedgen_hostname,
+        x,
+    );
+    feed_mgr.register_feed(
+        "hebrew-feed",
+        |db, _user, limit, start_cursor| {
+            let start_cursor = start_cursor.map(|v| {
+                i64::from_str_radix(&v, 10).ok()
+            }).flatten();
+            Box::pin(
+                async move {
+                let mut cursor = None;
+                let mut feed = vec![];
+                match sqlx::query!(
+                    r#"SELECT repo, post_path, indexed_dt as "indexed: i64" FROM post WHERE (? is NULL OR indexed_dt < ?) ORDER BY (indexed_dt/60) DESC, created_at DESC LIMIT ?"#,
+                    start_cursor,
+                    start_cursor,
+                    limit
+                )
+                .fetch_all(&db)
+                .await
+                {
+                    Err(err) => {
+                        error!("db error: {err}");
+                    }
+                    Ok(rows) => {
+                        feed = rows
+                            .into_iter()
+                            .map(|row| {
+                                cursor = row.indexed;
+                                let post = atrium_api::app::bsky::feed::defs::SkeletonFeedPostData {
+                                    feed_context: None,
+                                    post: format!("at://{}/app.bsky.feed.post/{}", row.repo, row.post_path),
+                                    reason: None,
+                                };
+                                post.into()
+                            })
+                            .collect::<Vec<_>>();
+                    }
+                }
+                if limit > feed.len() as u32 || cursor == start_cursor {
+                    cursor = None;
+                }
+                Ok(get_feed_skeleton::OutputData {
+                    cursor: cursor.map(|v| v.to_string()),
+                    feed,
+                })
+            })
+        },
+        false,
+    );
+    let feed_mgr = Arc::new(feed_mgr);
+
     let app = axum::Router::new()
         .route(
             "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -229,7 +192,7 @@ pub async fn web_server(state: State) {
         .route("/.well-known/did.json", axum::routing::get(well_known_did))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .with_state(feed_mgr);
 
     axum::serve(
         tokio::net::TcpListener::bind("0.0.0.0:80").await.unwrap(),

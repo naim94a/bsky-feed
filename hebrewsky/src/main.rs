@@ -198,6 +198,14 @@ async fn main() {
                                 info!("cleaned up {} rows", rows);
                             }
                         }
+                    match sqlx::query!("VACUUM").execute(&db).await {
+                        Ok(_) => {
+                            info!("vacuum done")
+                        },
+                        Err(err) => {
+                            error!("failed to vacuum db: {err}");
+                        },
+                    }
                 }
             }
             .with_current_subscriber(),

@@ -166,19 +166,22 @@ pub async fn process_post(
     let reply_to = post.reply.as_ref().map(|v| v.parent.uri.as_str());
     let indexed_at = std::time::UNIX_EPOCH.elapsed().unwrap().as_secs() as i64;
     let created_at = post.created_at.as_ref().timestamp();
+    let content = post.text.as_str();
     if let Err(e) = db
         .execute(sqlx::query!(
             r#"INSERT INTO post (
                 repo, post_path, cid,
                 reply_root, reply_to,
+                content,
                 language,
                 indexed_dt, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
             at_uri.repo,
             at_repo_path,
             cid,
             reply_root,
             reply_to,
+            content,
             "he",
             indexed_at,
             created_at

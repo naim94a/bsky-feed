@@ -3,6 +3,8 @@
 use std::{ops::Sub, sync::Arc, time::Duration};
 
 use atproto_feedgen::{self, Collections, Firehose, MessageTypes};
+use atrium_api::app::bsky::feed::post::RecordEmbedRefs;
+use feed::{process_interaction, Interaction};
 use sqlx::Executor;
 use tokio::sync::Mutex;
 use tracing::{error, info, instrument::WithSubscriber, warn};
@@ -89,6 +91,33 @@ impl atproto_feedgen::FirehoseHandler for FirehoseProcessor {
                     };
                     if let Some(cid) = &commit.cid {
                         let post = post.data;
+                        if let Some(atrium_api::types::Union::Refs(refs)) = &post.embed {
+                            match refs {
+                                RecordEmbedRefs::AppBskyEmbedRecordMain(rec) => {
+                                    process_interaction(
+                                        &self.db,
+                                        &atp,
+                                        Interaction::Quote {
+                                            subject: &rec.record.uri,
+                                            created_at: post.created_at.as_ref().timestamp(),
+                                        },
+                                    )
+                                    .await;
+                                }
+                                RecordEmbedRefs::AppBskyEmbedRecordWithMediaMain(rec) => {
+                                    process_interaction(
+                                        &self.db,
+                                        &atp,
+                                        Interaction::Quote {
+                                            subject: &rec.record.record.uri,
+                                            created_at: post.created_at.as_ref().timestamp(),
+                                        },
+                                    )
+                                    .await;
+                                }
+                                _ => {}
+                            }
+                        }
                         feed::process_post(&self.db, atp, cid, post).await;
                     } else {
                         panic!("no cid!");
@@ -99,14 +128,14 @@ impl atproto_feedgen::FirehoseHandler for FirehoseProcessor {
                         repo: &commit.repo,
                         path: &commit.path,
                     };
-                    feed::process_interaction(&self.db, atp, feed::Interaction::Like(&like)).await;
+                    feed::process_interaction(&self.db, &atp, feed::Interaction::Like(&like)).await;
                 }
                 atrium_api::record::KnownRecord::AppBskyFeedRepost(repost) => {
                     let atp = AtUriParts {
                         repo: &commit.repo,
                         path: &commit.path,
                     };
-                    feed::process_interaction(&self.db, atp, feed::Interaction::Repost(&repost))
+                    feed::process_interaction(&self.db, &atp, feed::Interaction::Repost(&repost))
                         .await;
                 }
                 _ => {}

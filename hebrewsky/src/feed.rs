@@ -210,9 +210,11 @@ pub async fn delete_post(db: &sqlx::SqlitePool, at_uri: AtUriParts<'_>) {
     }
     match db
         .execute(sqlx::query!(
-            "DELETE FROM interactions WHERE target_repo = ? AND target_path = ?",
+            "DELETE FROM interactions WHERE (target_repo = ? AND target_path = ?) OR (repo = ? AND path = ? AND interaction_type = 'quote')",
             at_uri.repo,
-            at_uri.path
+            at_uri.path,
+            at_uri.repo,
+            at_uri.path,
         ))
         .await
     {
@@ -233,12 +235,14 @@ pub async fn delete_post(db: &sqlx::SqlitePool, at_uri: AtUriParts<'_>) {
 pub enum Interaction<'a> {
     Like(&'a like::Record),
     Repost(&'a repost::Record),
+    Quote { subject: &'a str, created_at: i64 },
 }
 impl<'a> Interaction<'a> {
     fn get_subject(&self) -> &str {
         match self {
             Interaction::Like(v) => v.subject.uri.as_str(),
             Interaction::Repost(v) => v.subject.uri.as_str(),
+            Interaction::Quote { subject, .. } => subject,
         }
     }
 
@@ -246,6 +250,7 @@ impl<'a> Interaction<'a> {
         match self {
             Interaction::Like(v) => v.created_at.as_ref().timestamp(),
             Interaction::Repost(v) => v.created_at.as_ref().timestamp(),
+            Interaction::Quote { created_at, .. } => *created_at,
         }
     }
 
@@ -253,13 +258,14 @@ impl<'a> Interaction<'a> {
         match self {
             Interaction::Like(_) => "like",
             Interaction::Repost(_) => "repost",
+            Interaction::Quote { .. } => "quote",
         }
     }
 }
 
 pub async fn process_interaction(
     db: &sqlx::SqlitePool,
-    at_uri: AtUriParts<'_>,
+    at_uri: &AtUriParts<'_>,
     rec: Interaction<'_>,
 ) {
     let subject_uri = rec.get_subject();
@@ -278,8 +284,12 @@ pub async fn process_interaction(
         if let Some(v) = at_uri.path.strip_prefix("app.bsky.feed.repost/") {
             interaction_path = v;
         } else {
-            debug!("unknown interaction: target = {subject_uri}: interaction = {at_uri}");
-            return;
+            if let Some(v) = at_uri.path.strip_prefix("app.bsky.feed.post/") {
+                interaction_path = v;
+            } else {
+                debug!("unknown interaction: target = {subject_uri}: interaction = {at_uri}");
+                return;
+            }
         }
     }
 

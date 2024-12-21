@@ -1,11 +1,11 @@
 use atproto_feedgen::Cid;
-use atrium_api::app::bsky::feed::post::RecordData as Post;
+use atrium_api::app::bsky::feed::{like, post::RecordData as Post, repost};
 use sqlx::Executor;
 use std::{
     sync::{Arc, OnceLock},
     usize,
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use whatlang::Lang;
 
 use crate::AtUriParts;
@@ -192,7 +192,6 @@ pub async fn process_post(
     }
 }
 
-#[tracing::instrument(skip_all)]
 pub async fn delete_post(db: &sqlx::SqlitePool, at_uri: AtUriParts<'_>) {
     match db
         .execute(sqlx::query!(
@@ -207,6 +206,128 @@ pub async fn delete_post(db: &sqlx::SqlitePool, at_uri: AtUriParts<'_>) {
             if v.rows_affected() != 0 {
                 info!("deleted {}", &at_uri);
             }
+        }
+    }
+    match db
+        .execute(sqlx::query!(
+            "DELETE FROM interactions WHERE target_repo = ? AND target_path = ?",
+            at_uri.repo,
+            at_uri.path
+        ))
+        .await
+    {
+        Ok(v) => {
+            if v.rows_affected() != 0 {
+                debug!(
+                    "deleted {} interactions for post: {at_uri}",
+                    v.rows_affected()
+                );
+            }
+        }
+        Err(e) => {
+            error!("failed to delete interactions for {at_uri}: {e}");
+        }
+    }
+}
+
+pub enum Interaction<'a> {
+    Like(&'a like::Record),
+    Repost(&'a repost::Record),
+}
+impl<'a> Interaction<'a> {
+    fn get_subject(&self) -> &str {
+        match self {
+            Interaction::Like(v) => v.subject.uri.as_str(),
+            Interaction::Repost(v) => v.subject.uri.as_str(),
+        }
+    }
+
+    fn get_created_at(&self) -> i64 {
+        match self {
+            Interaction::Like(v) => v.created_at.as_ref().timestamp(),
+            Interaction::Repost(v) => v.created_at.as_ref().timestamp(),
+        }
+    }
+
+    fn get_interaction_type(&self) -> &str {
+        match self {
+            Interaction::Like(_) => "like",
+            Interaction::Repost(_) => "repost",
+        }
+    }
+}
+
+pub async fn process_interaction(
+    db: &sqlx::SqlitePool,
+    at_uri: AtUriParts<'_>,
+    rec: Interaction<'_>,
+) {
+    let subject_uri = rec.get_subject();
+    let subject_uri = match AtUriParts::try_from(subject_uri) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("failed to parse subject uri: {e}");
+            return;
+        }
+    };
+    let interaction_path;
+
+    if let Some(v) = at_uri.path.strip_prefix("app.bsky.feed.like/") {
+        interaction_path = v;
+    } else {
+        if let Some(v) = at_uri.path.strip_prefix("app.bsky.feed.repost/") {
+            interaction_path = v;
+        } else {
+            debug!("unknown interaction: target = {subject_uri}: interaction = {at_uri}");
+            return;
+        }
+    }
+
+    if subject_uri.repo == at_uri.repo {
+        // ignore self interactions...
+        return;
+    }
+
+    let post_path = match subject_uri.path.strip_prefix("app.bsky.feed.post/") {
+        Some(v) => v,
+        None => {
+            // liked something that isn't a post
+            return;
+        }
+    };
+
+    let created_at = rec.get_created_at();
+    let post_exists = sqlx::query!(
+        "SELECT count(*)>0 as 'has_post: bool' FROM post WHERE repo = ? AND post_path = ?",
+        subject_uri.repo,
+        post_path
+    )
+    .fetch_one(db)
+    .await
+    .map(|v| v.has_post)
+    .unwrap_or(false);
+
+    if !post_exists {
+        // ignore interactions with untracked posts
+        return;
+    }
+
+    let interaction_type = rec.get_interaction_type();
+
+    match db.execute(
+            sqlx::query!("INSERT INTO interactions (repo, path, target_repo, target_path, interaction_type, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            at_uri.repo,
+            interaction_path,
+            subject_uri.repo,
+            post_path,
+            interaction_type,
+            created_at,
+        )).await {
+        Ok(_) => {
+            debug!("new {interaction_type}: {at_uri} -> {subject_uri}");
+        }
+        Err(e) => {
+            error!("failed to {interaction_type} like into db: {e}");
         }
     }
 }

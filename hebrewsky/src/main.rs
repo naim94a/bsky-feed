@@ -39,6 +39,17 @@ struct AtUriParts<'a> {
     repo: &'a str,
     path: &'a str,
 }
+impl<'a> TryFrom<&'a str> for AtUriParts<'a> {
+    type Error = &'static str;
+
+    fn try_from(value: &'a str) -> Result<Self, Self::Error> {
+        let value = value.strip_prefix("at://").ok_or("not at://")?;
+        let mut s = value.splitn(2, '/');
+        let repo = s.next().ok_or("no repo")?;
+        let path = s.next().ok_or("no path")?;
+        Ok(Self { repo, path })
+    }
+}
 impl core::fmt::Display for AtUriParts<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "at://{}/{}", self.repo, self.path)
@@ -83,17 +94,34 @@ impl atproto_feedgen::FirehoseHandler for FirehoseProcessor {
                         panic!("no cid!");
                     }
                 }
+                atrium_api::record::KnownRecord::AppBskyFeedLike(like) => {
+                    let atp = AtUriParts {
+                        repo: &commit.repo,
+                        path: &commit.path,
+                    };
+                    feed::process_interaction(&self.db, atp, feed::Interaction::Like(&like)).await;
+                }
+                atrium_api::record::KnownRecord::AppBskyFeedRepost(repost) => {
+                    let atp = AtUriParts {
+                        repo: &commit.repo,
+                        path: &commit.path,
+                    };
+                    feed::process_interaction(&self.db, atp, feed::Interaction::Repost(&repost))
+                        .await;
+                }
                 _ => {}
             },
-            atproto_feedgen::RepoCommitOp::Delete(commit)
-                if commit.collection == Collections::AppBskyFeedPost =>
-            {
-                let atp = AtUriParts {
-                    repo: &commit.repo,
-                    path: &commit.path,
-                };
-                feed::delete_post(&self.db, atp).await;
-            }
+            atproto_feedgen::RepoCommitOp::Delete(commit) => match commit.collection {
+                Collections::AppBskyFeedPost => {
+                    let atp = AtUriParts {
+                        repo: &commit.repo,
+                        path: &commit.path,
+                    };
+                    feed::delete_post(&self.db, atp).await;
+                }
+
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -134,7 +162,11 @@ async fn main() {
     let firehose = Arc::new(
         Firehose::new("bsky.network", firehose_handler.clone())
             .accept_message_types(MessageTypes::Commit | MessageTypes::Info)
-            .accept_collections(Collections::AppBskyFeedPost),
+            .accept_collections(
+                Collections::AppBskyFeedPost
+                    | Collections::AppBskyFeedLike
+                    | Collections::AppBskyFeedRepost,
+            ),
     );
 
     let server_firehose = firehose.clone();

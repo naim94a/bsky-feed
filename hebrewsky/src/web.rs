@@ -133,45 +133,116 @@ pub async fn web_server(state: State) {
     feed_mgr.register_feed(
         "hebrew-feed",
         |db, _user, limit, start_cursor| {
+            // Our cursor contains two parts: 1. The highest indexed_dt of the view. 2. The indexed_dt to start from.
+            // The first part is used to determine the score's time decay component.
+            // The second part allows us to using pagination.
             let start_cursor = start_cursor.map(|v| {
-                i64::from_str_radix(&v, 10).ok()
-            }).flatten();
+                let (cursor_start_time, cursor_offset) = v.split_once('_')?;
+                let cursor_start_time = cursor_start_time.parse::<i64>().ok()?;
+                let cursor_offset = cursor_offset.parse::<i64>().ok()?;
+                Some((cursor_start_time, cursor_offset))
+            }).flatten()
+            .unwrap_or_else(|| {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as _;
+                (timestamp, timestamp)
+            });
             Box::pin(
                 async move {
-                let mut cursor = None;
-                let mut feed = vec![];
-                match sqlx::query!(
-                    r#"SELECT repo, post_path, indexed_dt as "indexed: i64" FROM post WHERE (? is NULL OR indexed_dt < ?) ORDER BY (indexed_dt/60) DESC, created_at DESC LIMIT ?"#,
-                    start_cursor,
-                    start_cursor,
-                    limit
-                )
-                .fetch_all(&db)
-                .await
-                {
+                // let mut cursor = None;
+                // let mut feed = vec![];
+                /*
+                Ranking posts:
+                1. Time decay: indexed_dt
+
+                2. Likes & Repost: SELECT COUNT(*) FROM interactions WHERE interaction_type = '...';
+                    quote +21
+                    repost +20
+                    like +10
+                3. Replies: SELECT COUNT(*) FROM post WHERE (reply_to = '...' OR reply_root = '...') AND repo != self.repo;
+                    reply +15
+                4. Is post a reply: post.reply_to is NULL;
+                    root post +20
+                5. Rate limit: count of the amout of root posts from the same user in the last 6 hours of the current post time.
+                    rate_limit -12*n
+
+                rank = indexed_dt + 25*quote + 20*repost + 10*like + 15*reply + 20*root_post - 12*rate_limit
+                */
+                // TODO: put likes, reposts and quotes into an indexed view.
+                // TODO: count post's direct comments.
+                let rows = sqlx::query!(r#"
+                    WITH likes AS (
+                        SELECT target_repo AS repo, target_path AS path, count(*) AS likes
+                        FROM interactions
+                        WHERE interaction_type = 'like' AND indexed_dt <= ?
+                        GROUP BY target_repo, target_path
+                    ),
+                    reposts AS (
+                        SELECT target_repo AS repo, target_path AS path, count(*) AS reposts
+                        FROM interactions
+                        WHERE interaction_type = 'repost' AND indexed_dt <= ?
+                        GROUP BY target_repo, target_path
+                    ),
+                    quotes AS (
+                        SELECT target_repo AS repo, target_path AS path, count(*) AS quotes
+                        FROM interactions
+                        WHERE interaction_type = 'quote' AND indexed_dt <= ?
+                        GROUP BY target_repo, target_path
+                    ),
+                    ranks AS (
+                        SELECT
+                            p.repo as repo,
+                            p.post_path as post_path,
+                            p.indexed_dt as indexed_dt,
+                            (IIF(p.reply_root is NULL, 20.0, 0.0) + 10.0*coalesce(l.likes, 0.0) + 20.0*coalesce(r.reposts, 0.0) + 21.0*coalesce(q.quotes, 0.0))/(CAST(((? - p.indexed_dt) / 3600) AS FLOAT) + 1.0) AS rank
+                        FROM post p
+                        LEFT JOIN likes l ON (l.repo = p.repo AND l.path = p.post_path)
+                        LEFT JOIN reposts r ON (r.repo = p.repo AND r.path = p.post_path)
+                        LEFT JOIN quotes q ON (q.repo = p.repo AND q.path = p.post_path)
+                        WHERE p.indexed_dt <= ?
+                    )
+                    SELECT repo, post_path, rank as "rank!: f64", indexed_dt as "indexed_dt!: i64" FROM ranks
+                    WHERE indexed_dt <= ?
+                    ORDER BY rank DESC
+                    LIMIT ?
+                    "#,
+                        // for with clauses for ranking.
+                        start_cursor.0, start_cursor.0, start_cursor.0, start_cursor.0, start_cursor.0,
+
+                        // use for the final query
+                        start_cursor.1, limit)
+                    .fetch_all(&db)
+                        .await;
+                let rows = match rows {
                     Err(err) => {
                         error!("db error: {err}");
+                        return Err(get_feed_skeleton::Error::UnknownFeed("DB Error".to_owned().into()));
                     }
-                    Ok(rows) => {
-                        feed = rows
-                            .into_iter()
-                            .map(|row| {
-                                cursor = row.indexed;
-                                let post = atrium_api::app::bsky::feed::defs::SkeletonFeedPostData {
-                                    feed_context: None,
-                                    post: format!("at://{}/app.bsky.feed.post/{}", row.repo, row.post_path),
-                                    reason: None,
-                                };
-                                post.into()
-                            })
-                            .collect::<Vec<_>>();
-                    }
-                }
-                if limit > feed.len() as u32 || cursor == start_cursor {
-                    cursor = None;
-                }
+                    Ok(rows) => rows,
+                };
+                let mut last_dt = start_cursor.1;
+                let feed = rows.into_iter().map(|row| {
+                    let post = atrium_api::app::bsky::feed::defs::SkeletonFeedPostData {
+                        feed_context: None,
+                        post: format!("at://{}/app.bsky.feed.post/{}", row.repo, row.post_path),
+                        reason: None,
+                    };
+                    let indexed_str = time::OffsetDateTime::from_unix_timestamp(row.indexed_dt)
+                        .unwrap()
+                        ;
+                    debug!("post: {indexed_str:?} rank = {} at://{}/app.bsky.feed.post/{}", row.rank, row.repo, row.post_path);
+                    last_dt = row.indexed_dt;
+                    post.into()
+                }).collect::<Vec<_>>();
+                let cursor = if limit > feed.len() as u32 || last_dt == start_cursor.1 {
+                    None
+                } else {
+                    Some(format!("{}_{}", start_cursor.0, last_dt))
+                };
                 Ok(get_feed_skeleton::OutputData {
-                    cursor: cursor.map(|v| v.to_string()),
+                    cursor,
                     feed,
                 })
             })

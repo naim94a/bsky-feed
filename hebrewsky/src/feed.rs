@@ -157,8 +157,10 @@ pub async fn process_post(
     };
 
     info!(
-        "new post: {}: {:?} - {}",
-        &at_uri, &post.created_at, post.text
+        "new post: {}: {} - {}",
+        &at_uri,
+        &post.created_at.as_str(),
+        post.text
     );
 
     let cid = cid.to_string();

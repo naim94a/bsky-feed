@@ -171,7 +171,6 @@ pub async fn web_server(state: State) {
                 rank = indexed_dt + 25*quote + 20*repost + 10*like + 15*reply + 20*root_post - 12*rate_limit
                 */
                 // TODO: put likes, reposts and quotes into an indexed view.
-                // TODO: count post's direct comments.
                 let rows = sqlx::query!(r#"
                     WITH likes AS (
                         SELECT target_repo AS repo, target_path AS path, count(*) AS likes
@@ -191,25 +190,32 @@ pub async fn web_server(state: State) {
                         WHERE interaction_type = 'quote' AND indexed_dt <= ?
                         GROUP BY target_repo, target_path
                     ),
+                    replies AS (
+                        SELECT reply_to AS path, count(*) AS replies
+                        FROM post
+                        WHERE reply_to IS NOT NULL AND indexed_dt <= ?
+                        GROUP BY reply_to
+                    ),
                     ranks AS (
                         SELECT
                             p.repo as repo,
                             p.post_path as post_path,
                             p.indexed_dt as indexed_dt,
-                            (IIF(p.reply_root is NULL, 20.0, 0.0) + 10.0*coalesce(l.likes, 0.0) + 20.0*coalesce(r.reposts, 0.0) + 21.0*coalesce(q.quotes, 0.0))/(CAST(((? - p.indexed_dt) / 3600) AS FLOAT) + 1.0) AS rank
+                            (IIF(p.reply_root is NULL, 2.0, 1.0) + IIF(? - p.indexed_dt < 300, 3.0, 0.0) + 3.0*coalesce(l.likes, 0.0) + 4.0*coalesce(rp.replies, 0.0) + 4.0*coalesce(r.reposts, 0.0) + 5.0*coalesce(q.quotes, 0.0))/(CAST(((? - p.indexed_dt) / 1800) AS FLOAT) + 1.0) AS rank
                         FROM post p
                         LEFT JOIN likes l ON (l.repo = p.repo AND l.path = p.post_path)
                         LEFT JOIN reposts r ON (r.repo = p.repo AND r.path = p.post_path)
                         LEFT JOIN quotes q ON (q.repo = p.repo AND q.path = p.post_path)
-                        WHERE p.indexed_dt <= ?
+                        LEFT JOIN replies rp ON (rp.path = concat('at://', p.repo, '/app.bsky.feed.post/', p.post_path))
+                        WHERE p.indexed_dt < ?
                     )
                     SELECT repo, post_path, rank as "rank!: f64", indexed_dt as "indexed_dt!: i64" FROM ranks
                     WHERE indexed_dt <= ?
-                    ORDER BY rank DESC
+                    ORDER BY rank DESC, indexed_dt DESC
                     LIMIT ?
                     "#,
                         // for with clauses for ranking.
-                        start_cursor.0, start_cursor.0, start_cursor.0, start_cursor.0, start_cursor.0,
+                        start_cursor.0, start_cursor.0, start_cursor.0, start_cursor.0, start_cursor.0, start_cursor.0, start_cursor.0,
 
                         // use for the final query
                         start_cursor.1, limit)

@@ -193,7 +193,7 @@ pub async fn web_server(state: State) {
                     replies AS (
                         SELECT reply_to AS path, count(*) AS replies
                         FROM post
-                        WHERE reply_to IS NOT NULL AND indexed_dt <= ?
+                        WHERE reply_to IS NOT NULL AND indexed_dt <= ? AND reply_to NOT LIKE concat('at://', repo, '/%')
                         GROUP BY reply_to
                     ),
                     ranks AS (
@@ -201,7 +201,7 @@ pub async fn web_server(state: State) {
                             p.repo as repo,
                             p.post_path as post_path,
                             p.indexed_dt as indexed_dt,
-                            (IIF(p.reply_root is NULL, 2.0, 1.0) + IIF(? - p.indexed_dt < 300, 3.0, 0.0) + 3.0*coalesce(l.likes, 0.0) + 4.0*coalesce(rp.replies, 0.0) + 4.0*coalesce(r.reposts, 0.0) + 5.0*coalesce(q.quotes, 0.0))/(CAST(((? - p.indexed_dt) / 1800) AS FLOAT) + 1.0) AS rank
+                            (IIF(p.reply_root is NULL, 2.0, 1.0) + IIF(? - p.indexed_dt < 300, 3.0, 0.0) + 3.0*coalesce(l.likes, 0.0) + 4.0*coalesce(rp.replies, 0.0) + 4.0*coalesce(r.reposts, 0.0) + 5.0*coalesce(q.quotes, 0.0))/EXP(CAST(((? - p.indexed_dt) / 3600) AS FLOAT) / 2.0) AS rank
                         FROM post p
                         LEFT JOIN likes l ON (l.repo = p.repo AND l.path = p.post_path)
                         LEFT JOIN reposts r ON (r.repo = p.repo AND r.path = p.post_path)
@@ -238,7 +238,6 @@ pub async fn web_server(state: State) {
                     let indexed_str = time::OffsetDateTime::from_unix_timestamp(row.indexed_dt)
                         .unwrap()
                         ;
-                    debug!("post: {indexed_str:?} rank = {} at://{}/app.bsky.feed.post/{}", row.rank, row.repo, row.post_path);
                     last_dt = row.indexed_dt;
                     post.into()
                 }).collect::<Vec<_>>();

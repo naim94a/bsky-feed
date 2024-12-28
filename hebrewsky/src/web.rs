@@ -136,21 +136,29 @@ pub async fn web_server(state: State) {
             // Our cursor contains two parts: 1. The highest indexed_dt of the view. 2. The indexed_dt to start from.
             // The first part is used to determine the score's time decay component.
             // The second part allows us to using pagination.
-            let start_cursor = start_cursor.map(|v| {
-                let (cursor_start_time, cursor_offset) = v.split_once('_')?;
-                let cursor_start_time = cursor_start_time.parse::<i64>().ok()?;
-                let cursor_offset = cursor_offset.parse::<i64>().ok()?;
-                Some((cursor_start_time, cursor_offset))
-            }).flatten()
-            .unwrap_or_else(|| {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as _;
-                (timestamp, timestamp)
-            });
             Box::pin(
                 async move {
+                    let start_cursor = match start_cursor.map(|v| {
+                        let (cursor_start_time, cursor_offset) = v.split_once('_')?;
+                        let cursor_start_time = cursor_start_time.parse::<i64>().ok()?;
+                        let cursor_offset = cursor_offset.parse::<i64>().ok()?;
+                        Some((cursor_start_time, cursor_offset))
+                    }).flatten() {
+                        Some(v) => v,
+                        None => {
+                            let res = sqlx::query!(r#"WITH x AS (
+                                SELECT MAX(indexed_dt) AS m FROM post
+                                UNION
+                                SELECT MAX(unixepoch(indexed_dt)) AS m FROM interactions
+                                )
+                                SELECT MAX(m) AS "latest!" FROM x"#)
+                                .fetch_one(&db).await;
+                            match res {
+                                Ok(v) => (v.latest, v.latest),
+                                Err(_) => return Err(get_feed_skeleton::Error::UnknownFeed("DB Error".to_owned().into())),
+                            }
+                        }
+                    };
                 // let mut cursor = None;
                 // let mut feed = vec![];
                 /*

@@ -387,9 +387,9 @@ impl<H: FirehoseHandler + Send + Sync + 'static> Firehose<H> {
                 Some(v) => match Collections::from_str(v) {
                     Ok(v) => v,
                     Err(_) => {
-                        debug!("unknown collection '{v}'");
+                        debug!("unknown collection @ 'at://{}/{}'", repo, &op.path);
                         continue;
-                    } // this collection is unknown to us
+                    }
                 },
             };
             if !self.collections.contains(collection) {

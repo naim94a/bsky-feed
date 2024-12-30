@@ -246,7 +246,7 @@ async fn main() {
                     let oldest_timestamp = std::time::UNIX_EPOCH
                         .elapsed()
                         .unwrap()
-                        .sub(Duration::from_secs(3600 * 24 * 30))
+                        .sub(Duration::from_secs(3600 * 24 * 90))
                         .as_secs() as i64;
 
                     match sqlx::query!("DELETE FROM post WHERE indexed_dt < ? OR (created_at is not NULL AND created_at < ?)", oldest_timestamp, oldest_timestamp)

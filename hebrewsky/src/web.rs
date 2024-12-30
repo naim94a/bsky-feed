@@ -217,6 +217,7 @@ pub async fn web_server(state: State) {
                         LEFT JOIN quotes q ON (q.repo = p.repo AND q.path = p.post_path)
                         LEFT JOIN replies rp ON (rp.path = concat('at://', p.repo, '/app.bsky.feed.post/', p.post_path))
                         WHERE p.indexed_dt >= ? AND p.indexed_dt <= ?
+                            AND abs(p.indexed_dt - p.created_at) < 3600*12
                     )
                     SELECT repo, post_path, rank as "rank!: f64", indexed_dt as "indexed_dt!: i64" FROM ranks
                     WHERE indexed_dt >= ? AND indexed_dt <= ?

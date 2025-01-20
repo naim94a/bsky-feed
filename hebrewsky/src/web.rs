@@ -59,9 +59,9 @@ impl<S> FromRequestParts<S> for AuthExtractor {
         let auth = auth.strip_prefix("Bearer ").ok_or(())?;
         let auth = auth.trim();
         let mut auth = auth.rsplitn(2, '.');
-        let header_and_payload = auth.next().ok_or(())?;
         let sig = auth.next().ok_or(())?;
-        let (header, payload) = {
+        let header_and_payload = auth.next().ok_or(())?;
+        let (_header, payload) = {
             let mut s = header_and_payload.split('.');
             let h = s.next().ok_or(())?;
             let p = s.next().ok_or(())?;
@@ -71,17 +71,24 @@ impl<S> FromRequestParts<S> for AuthExtractor {
             (h, p)
         };
 
-        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(&header)
-            .map_err(|_| ())?;
-        let header = serde_json::from_slice::<JwtHeader>(&header).map_err(|_| ())?;
+        // let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        //     .decode(&header)
+        //     .map_err(|_| ())?;
+        // let header = serde_json::from_slice::<JwtHeader>(&header).map_err(|_| ())?;
 
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(&payload)
-            .map_err(|_| ())?;
+            .map_err(|_| {
+                trace!("failed to decode payload base64");
+            })?;
+
+        let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&sig)
+            .map_err(|_| {
+                trace!("failed to decode sig base64");
+            })?;
 
         let payload = serde_json::from_slice::<JwtPayload>(&payload).map_err(|_| ())?;
-        trace!("token: header={header:?} payload={payload:?}");
         let timestamp = std::time::UNIX_EPOCH.elapsed().unwrap().as_secs();
         if timestamp > payload.exp as u64 {
             trace!("JWT is expired");
@@ -102,11 +109,10 @@ impl<S> FromRequestParts<S> for AuthExtractor {
                     if atrium_crypto::verify::verify_signature(
                         &did_key,
                         header_and_payload.as_bytes(),
-                        sig.as_bytes(),
+                        &sig,
                     )
                     .is_ok()
                     {
-                        trace!("JWT token valid");
                         let handle = did_doc
                             .also_known_as
                             .map(|mut v| {
@@ -117,6 +123,7 @@ impl<S> FromRequestParts<S> for AuthExtractor {
                                 }
                             })
                             .flatten();
+                        trace!("JWT token valid: {handle:?}");
                         return Ok(Self {
                             iss: payload.iss,
                             handle,

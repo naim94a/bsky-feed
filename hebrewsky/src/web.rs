@@ -71,15 +71,15 @@ impl<S> FromRequestParts<S> for AuthExtractor {
             (h, p)
         };
 
-        let header = serde_json::from_str::<JwtHeader>(header).map_err(|_| ())?;
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&header)
+            .map_err(|_| ())?;
+        let header = serde_json::from_slice::<JwtHeader>(&header).map_err(|_| ())?;
 
-        let payload = {
-            let mut res = vec![];
-            base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode_vec(payload, &mut res)
-                .map_err(|_| ())?;
-            res
-        };
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&payload)
+            .map_err(|_| ())?;
+
         let payload = serde_json::from_slice::<JwtPayload>(&payload).map_err(|_| ())?;
         trace!("token: header={header:?} payload={payload:?}");
         let timestamp = std::time::UNIX_EPOCH.elapsed().unwrap().as_secs();

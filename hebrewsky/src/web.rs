@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::db::State;
+use crate::utils;
 use atproto_feedgen::FeedManager;
 use atrium_api::app::bsky::feed::get_feed_skeleton;
 use atrium_api::types::string::Did;
@@ -40,7 +41,11 @@ struct JwtHeader {
     alg: String,
 }
 
-struct AuthExtractor;
+struct AuthExtractor {
+    iss: String,
+    handle: Option<String>,
+}
+
 #[async_trait]
 impl<S> FromRequestParts<S> for AuthExtractor {
     type Rejection = ();
@@ -53,15 +58,20 @@ impl<S> FromRequestParts<S> for AuthExtractor {
         let auth = auth.to_str().map_err(|_| ())?;
         let auth = auth.strip_prefix("Bearer ").ok_or(())?;
         let auth = auth.trim();
-        let mut auth = auth.split('.');
-        let header = auth.next().ok_or(())?;
-        let payload = auth.next().ok_or(())?;
+        let mut auth = auth.rsplitn(2, '.');
+        let header_and_payload = auth.next().ok_or(())?;
         let sig = auth.next().ok_or(())?;
-        if auth.next().is_some() {
-            return Err(());
-        }
+        let (header, payload) = {
+            let mut s = header_and_payload.split('.');
+            let h = s.next().ok_or(())?;
+            let p = s.next().ok_or(())?;
+            if s.next().is_some() {
+                return Err(());
+            }
+            (h, p)
+        };
 
-        // let header = serde_json::from_str::<JwtHeader>(header).map_err(|_| ())?;
+        let header = serde_json::from_str::<JwtHeader>(header).map_err(|_| ())?;
 
         let payload = {
             let mut res = vec![];
@@ -71,10 +81,53 @@ impl<S> FromRequestParts<S> for AuthExtractor {
             res
         };
         let payload = serde_json::from_slice::<JwtPayload>(&payload).map_err(|_| ())?;
-        trace!("current token = {:?}", &payload);
+        trace!("token: header={header:?} payload={payload:?}");
+        let timestamp = std::time::UNIX_EPOCH.elapsed().unwrap().as_secs();
+        if timestamp > payload.exp as u64 {
+            trace!("JWT is expired");
+            return Err(());
+        }
 
-        //        tracing::info!(" auth = {auth} ");
-        Ok(Self)
+        let did_doc = match utils::resolve_did(&payload.iss).await {
+            Ok(v) => v,
+            Err(_) => {
+                trace!("failed to resolve did {}", &payload.iss);
+                return Err(());
+            }
+        };
+        if let Some(vm) = did_doc.verification_method {
+            for verification_method in vm {
+                if let Some(mb) = verification_method.public_key_multibase {
+                    let did_key = format!("did:key:{mb}");
+                    if atrium_crypto::verify::verify_signature(
+                        &did_key,
+                        header_and_payload.as_bytes(),
+                        sig.as_bytes(),
+                    )
+                    .is_ok()
+                    {
+                        trace!("JWT token valid");
+                        let handle = did_doc
+                            .also_known_as
+                            .map(|mut v| {
+                                if v.is_empty() {
+                                    None
+                                } else {
+                                    Some(v.remove(0))
+                                }
+                            })
+                            .flatten();
+                        return Ok(Self {
+                            iss: payload.iss,
+                            handle,
+                        });
+                    }
+                }
+            }
+        } else {
+            debug!("did doc has no verification method");
+        }
+        return Err(());
     }
 }
 

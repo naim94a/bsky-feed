@@ -12,6 +12,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod db;
 mod feed;
+mod utils;
 mod web;
 
 struct FirehoseProcessor {

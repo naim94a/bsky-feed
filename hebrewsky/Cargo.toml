@@ -18,6 +18,7 @@ tracing = "0.1.40"
 serde = { version = "1.0.209", features = ["derive"] }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 atrium-api = "0.24.2"
+atrium-crypto = { git = "https://github.com/sugyan/atrium", package = "atrium-crypto" }
 dotenvy = "0.15.7"
 tower-http = { version = "0.5.2", features = [
     "compression-br",
@@ -31,6 +32,11 @@ bsky-sdk = { version = "0.1.8", optional = true }
 serde_json = "1.0.128"
 base64 = "0.22.1"
 whatlang = "0.16.4"
+reqwest = { version = "0.12.7", default-features = false, features = [
+    "json",
+    "rustls-tls-webpki-roots",
+    "rustls-tls",
+] }
 
 [features]
 default = []

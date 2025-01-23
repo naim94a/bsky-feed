@@ -10,7 +10,7 @@ license = "MIT"
 name = "print_posts"
 
 [dependencies]
-atrium-api = "0.24.2"
+atrium-api = "^0.24.10"
 fastwebsockets = { version = "0.8.0", features = ["upgrade"] }
 futures = "0.3.30"
 serde = { version = "1.0.209", features = ["derive"] }

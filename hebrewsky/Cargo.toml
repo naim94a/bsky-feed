@@ -17,7 +17,7 @@ tokio = { version = "1.42.0", features = ["full"] }
 tracing = "0.1.40"
 serde = { version = "1.0.209", features = ["derive"] }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-atrium-api = "0.24.2"
+atrium-api = "^0.24.10"
 atrium-crypto = { git = "https://github.com/sugyan/atrium", package = "atrium-crypto" }
 dotenvy = "0.15.7"
 tower-http = { version = "0.5.2", features = [

@@ -1,11 +1,15 @@
 use atproto_feedgen::Cid;
-use atrium_api::app::bsky::feed::{like, post::RecordData as Post, repost};
+use atrium_api::app::bsky::feed::{
+    like,
+    post::{RecordData as Post, RecordEmbedRefs},
+    repost,
+};
 use sqlx::Executor;
 use std::{
     sync::{Arc, OnceLock},
     usize,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use whatlang::Lang;
 
 use crate::AtUriParts;
@@ -156,8 +160,22 @@ pub async fn process_post(
         }
     };
 
+    let embed_type = post
+        .embed
+        .map(|e| match e {
+            atrium_api::types::Union::Refs(refs) => match refs {
+                RecordEmbedRefs::AppBskyEmbedImagesMain(_) => "images",
+                RecordEmbedRefs::AppBskyEmbedVideoMain(_) => "video",
+                RecordEmbedRefs::AppBskyEmbedExternalMain(_) => "external",
+                RecordEmbedRefs::AppBskyEmbedRecordMain(_) => "record",
+                RecordEmbedRefs::AppBskyEmbedRecordWithMediaMain(_) => "record_with_media",
+            },
+            atrium_api::types::Union::Unknown(_) => "unknown",
+        })
+        .unwrap_or("");
+
     info!(
-        "new post: {}: {} - {}",
+        "new post: {} {embed_type:?}: {} - {}",
         &at_uri,
         &post.created_at.as_str(),
         post.text
@@ -176,8 +194,9 @@ pub async fn process_post(
                 reply_root, reply_to,
                 content,
                 language,
+                embeds,
                 indexed_dt, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
             at_uri.repo,
             at_repo_path,
             cid,
@@ -185,6 +204,7 @@ pub async fn process_post(
             reply_to,
             content,
             "he",
+            embed_type,
             indexed_at,
             created_at
         ))
@@ -336,7 +356,7 @@ pub async fn process_interaction(
             created_at,
         )).await {
         Ok(_) => {
-            debug!("new {interaction_type}: {at_uri} -> {subject_uri}");
+            trace!("new {interaction_type}: {at_uri} -> {subject_uri}");
         }
         Err(e) => {
             error!("failed to {interaction_type} like into db: {e}");

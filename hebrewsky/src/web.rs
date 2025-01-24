@@ -330,6 +330,42 @@ pub async fn web_server(state: State) {
         },
         false,
     );
+    feed_mgr.register_feed(
+        "hebrew-feedeos",
+        |db, _user, limit, last_cursor| {
+            Box::pin(async move {
+                let last_cursor = last_cursor.map(|v| {
+                    u32::from_str_radix(&v, 10).ok()
+                }).flatten();
+                let rows = match sqlx::query!(
+                    "SELECT repo, post_path, indexed_dt as \"indexed_dt!: u32\" FROM post WHERE embeds = 'video' AND (indexed_dt < ? AND ? is NOT NULL) ORDER BY indexed_dt DESC LIMIT ?",
+                    last_cursor, last_cursor,
+                    limit
+                ).fetch_all(&db).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("db error: {e}");
+                        return Err(get_feed_skeleton::Error::UnknownFeed("DB Error".to_owned().into()));
+                    }
+                };
+                let mut c = None;
+                let feed = rows.into_iter().map(|row| {
+                    c = Some(row.indexed_dt);
+                    let post = atrium_api::app::bsky::feed::defs::SkeletonFeedPostData {
+                        feed_context: None,
+                        post: format!("at://{}/app.bsky.feed.post/{}", row.repo, row.post_path),
+                        reason: None,
+                    };
+                    post.into()
+                }).collect();
+                Ok(get_feed_skeleton::OutputData {
+                    cursor: c.map(|v| v.to_string()),
+                    feed,
+                })
+            })
+        },
+        false,
+    );
     let feed_mgr = Arc::new(feed_mgr);
 
     let app = axum::Router::new()

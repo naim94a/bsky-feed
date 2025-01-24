@@ -338,7 +338,7 @@ pub async fn web_server(state: State) {
                     u32::from_str_radix(&v, 10).ok()
                 }).flatten();
                 let rows = match sqlx::query!(
-                    "SELECT repo, post_path, indexed_dt as \"indexed_dt!: u32\" FROM post WHERE embeds = 'video' AND (indexed_dt < ? AND ? is NOT NULL) ORDER BY indexed_dt DESC LIMIT ?",
+                    "SELECT repo, post_path, indexed_dt as \"indexed_dt!: u32\" FROM post WHERE embeds = 'video' AND (indexed_dt < ? OR ? IS NULL) ORDER BY indexed_dt DESC LIMIT ?",
                     last_cursor, last_cursor,
                     limit
                 ).fetch_all(&db).await {

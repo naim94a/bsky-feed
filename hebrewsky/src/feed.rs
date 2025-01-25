@@ -170,7 +170,17 @@ pub async fn process_post(
                 RecordEmbedRefs::AppBskyEmbedRecordMain(_) => "record",
                 RecordEmbedRefs::AppBskyEmbedRecordWithMediaMain(_) => "record_with_media",
             },
-            atrium_api::types::Union::Unknown(_) => "unknown",
+            atrium_api::types::Union::Unknown(unk) => match unk.r#type.as_str() {
+                "app.bsky.embed.video" => "video",
+                "app.bsky.embed.images" => "images",
+                "app.bsky.embed.external" => "external",
+                "app.bsky.embed.record" => "record",
+                "app.bsky.embed.recordWithMedia" => "record_with_media",
+                _ => {
+                    debug!("unknown type: {unk:?}");
+                    "unknown"
+                }
+            },
         })
         .unwrap_or("");
 
